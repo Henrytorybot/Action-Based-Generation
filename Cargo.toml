@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+# The git helper UI lives beside the main crate as a workspace member, so
+# `cargo run -p abg-git-ui` builds it without touching this package.
+[workspace]
+members = ["crates/git-ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = 2

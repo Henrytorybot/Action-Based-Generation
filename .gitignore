@@ -1,1 +1,5 @@
 /target
+**/*.rs.bk
+*.pdb
+*.zip
+.DS_Store
