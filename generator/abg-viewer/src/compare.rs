@@ -5,16 +5,19 @@
 //! same as that" — which is the mutation mechanic asked for a result instead
 //! of a number of steps.
 //!
-//! Likeness is counted at the first degree only. Two cells are alike where
-//! one single thing would make them equal — one tile changed, one rotation,
-//! one mirror through the middle, or one walk of a tile — and otherwise they
-//! are not alike at all. There is no sliding scale, because "four changes
-//! away" is not a weaker kind of recognition; it is no recognition.
+//! Distance is counted in **steps**, not shares. A step is one single thing:
+//! one changed tile, one rotation, one mirror on an axis through the middle,
+//! or one walk of a tile. All four are the same distance — a mirrored cell is
+//! no further from its original than a cell with one tile moved — so the kind
+//! of step is a footnote and the count is the measure.
 //!
-//! The column that matters most is the right-hand one: what two *unrelated*
-//! units score. Wall agrees with wall by chance, so that is the floor of every
-//! percentage here, and it is nowhere near zero. Without it on screen, 70%
-//! looks like "fairly similar" when it means "nothing to do with each other".
+//! Only the first degree is counted. A cell more than one step away is not
+//! slightly less familiar, it is somewhere else, so it is reported as being
+//! past reach rather than folded into the total. When any cell is past reach
+//! the answer becomes a floor, "at least n steps", rather than a number.
+//!
+//! The line to read it against is what two *unrelated* units come out at.
+//! Nothing here starts at zero.
 
 use std::time::Instant;
 
@@ -273,72 +276,89 @@ impl Compare {
             return;
         };
 
-        ui.label(egui::RichText::new("How alike they are").strong());
+        ui.label(egui::RichText::new("How far apart they are").strong());
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(report.distance())
+                .size(19.0)
+                .strong()
+                .color(if report.is_exact() {
+                    egui::Color32::from_rgb(110, 195, 130)
+                } else {
+                    FLOOR_COLOUR
+                }),
+        );
         ui.label(
             egui::RichText::new(
-                "Cells count as alike only where one single thing would make \
-                 them equal. Anything further away is not alike at all.",
+                "A step is one single thing: one changed tile, one rotation, \
+                 one mirror, or one walk of a tile. They are all the same \
+                 distance.",
             )
             .small()
             .weak(),
         );
-        ui.add_space(6.0);
-
-        let floor = self.floor.as_ref().map(Report::patterns);
-
-        egui::Grid::new("likeness")
-            .num_columns(4)
-            .spacing([8.0, 5.0])
-            .show(ui, |ui| {
-                ui.label("");
-                ui.label("");
-                ui.label(egui::RichText::new("this pair").small().weak());
-                ui.label(egui::RichText::new("unrelated").small().color(FLOOR_COLOUR));
-                ui.end_row();
-
-                for (index, (label, value)) in report.patterns().into_iter().enumerate() {
-                    ui.label(egui::RichText::new(label).small());
-                    match value {
-                        Some(value) => {
-                            let base = floor.and_then(|rows| rows[index].1);
-                            ui.add(
-                                egui::ProgressBar::new(value / 100.0)
-                                    .desired_width(70.0)
-                                    .fill(shade(value, base)),
-                            );
-                            ui.label(egui::RichText::new(format!("{value:.1}%")).small());
-                            ui.label(
-                                egui::RichText::new(
-                                    base.map_or_else(|| "-".to_string(), |b| format!("{b:.1}%")),
-                                )
-                                .small()
-                                .color(FLOOR_COLOUR),
-                            );
-                        }
-                        None => {
-                            ui.label(egui::RichText::new("-").weak());
-                            ui.label(
-                                egui::RichText::new("too small to have cells")
-                                    .small()
-                                    .weak(),
-                            );
-                            ui.label("");
-                        }
-                    }
-                    ui.end_row();
-                }
-            });
 
         ui.add_space(8.0);
+        egui::Grid::new("steps")
+            .num_columns(2)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, label: &str, value: u64, dim: bool| {
+                    let text = egui::RichText::new(label).small();
+                    ui.label(if dim { text.weak() } else { text });
+                    let number = egui::RichText::new(format!("{value}")).small().monospace();
+                    ui.label(if dim { number.weak() } else { number });
+                    ui.end_row();
+                };
+
+                row(ui, "cells in all", report.cells, true);
+                row(ui, "already equal", report.equal, false);
+                row(ui, "one step away", report.one_step, false);
+                row(ui, "    by one changed tile", report.by_tile, true);
+                row(ui, "    by one rotation", report.by_turn, true);
+                row(ui, "    by one mirror", report.by_mirror, true);
+                row(ui, "    by one walk", report.by_walk, true);
+                row(ui, "past one step", report.beyond, false);
+            });
+
         ui.label(
             egui::RichText::new(
-                "The right-hand column is the floor, not zero. Only figures \
-                 standing clear of it mean anything, which is what the colour \
-                 of the bar marks.",
+                "The four lines under \"one step away\" overlap: a cell can be \
+                 reachable more than one way, and is counted under each. They \
+                 say what kind of step is available, not how many there are.",
             )
             .small()
             .weak(),
         );
+
+        if report.beyond > 0 {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} cells are past one step, so the real distance is                      unknown and this is only a floor.",
+                    report.beyond
+                ))
+                .small()
+                .color(FLOOR_COLOUR),
+            );
+        }
+
+        if let Some(floor) = self.floor.as_ref() {
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(format!("Two unrelated units: {}", floor.distance()))
+                    .small()
+                    .color(FLOOR_COLOUR),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Nothing here starts at zero, so that is the line to read \
+                     the number above against.",
+                )
+                .small()
+                .weak(),
+            );
+        }
 
         ui.add_space(14.0);
         ui.separator();
@@ -346,8 +366,8 @@ impl Compare {
         ui.label(egui::RichText::new("Bulk measures").strong());
         ui.label(
             egui::RichText::new(
-                "Whole-unit totals. None of these is a shape, so none is \
-                 something a player could point at.",
+                "Whole-unit totals, as shares. None of these is a shape, so \
+                 none is something a player could point at.",
             )
             .small()
             .weak(),
@@ -525,12 +545,7 @@ mod tests {
                 report.tiles
             );
             // Only a unit at least one cell across has cells to compare.
-            assert_eq!(
-                report.cells_similar.is_some(),
-                level.side() >= 3,
-                "{}",
-                level.name()
-            );
+            assert_eq!(report.cells > 0, level.side() >= 3, "{}", level.name());
         }
     }
 

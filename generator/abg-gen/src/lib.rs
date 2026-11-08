@@ -1118,12 +1118,12 @@ mod tests {
             let mut nudges = Nudges::new();
             nudges.turn(0, 0);
             let after = generate_with(Level::Cell, &p, &nudges);
-            let turned = similarity::compare(&before, &after)
-                .cells_one_turn
-                .expect("a cell has one cell");
-            assert_eq!(
-                turned, 100.0,
-                "seed {seed}: a bare cell did not read back as one rotation"
+            let report = similarity::compare(&before, &after);
+            assert!(
+                report.steps() <= 1 && report.is_exact(),
+                "seed {seed}: a bare cell came out {} away, exact: {}",
+                report.steps(),
+                report.is_exact()
             );
         }
 
@@ -1136,10 +1136,7 @@ mod tests {
                 let mut nudges = Nudges::new();
                 nudges.turn(cx * 3, cy * 3);
                 let after = generate_with(Level::House, &params, &nudges);
-                let turned = similarity::compare(&plain, &after)
-                    .cells_one_turn
-                    .expect("a house has cells");
-                if turned < 100.0 {
+                if !similarity::compare(&plain, &after).is_exact() {
                     covered += 1;
                 }
             }

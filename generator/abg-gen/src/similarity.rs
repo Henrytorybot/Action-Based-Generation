@@ -109,40 +109,30 @@ pub struct Report {
     /// eight.
     pub turned: f32,
     pub motion: Rigid,
-    /// Cells that are already equal, needing nothing done to them. `None`
-    /// for a unit smaller than one cell.
+    /// How many cells the two units have in all. Zero for a unit smaller
+    /// than one cell.
+    pub cells: u64,
+    /// Cells that are already equal, needing nothing at all.
+    pub equal: u64,
+    /// Cells one step away: one single thing would make them equal.
     ///
-    /// This and the four below it are what a player has a chance of
-    /// noticing. A cell is a shape, and people recognise a shape they have
-    /// seen before even when it has been turned round or slid over. A tile
-    /// count across a whole unit is not a shape; it is an accident of where
-    /// walls happened to fall.
+    /// One mirror is one step, exactly as near as one changed tile. The four
+    /// things are not four kinds of likeness to be reported against each
+    /// other — they are the same distance, and the distance is the measure.
+    pub one_step: u64,
+    /// Cells more than one step apart. Not measured any further, because
+    /// recognition is close to all-or-nothing: a place two things away is not
+    /// half-remembered, it is somewhere else.
+    pub beyond: u64,
+    /// Which single thing would do it, for the cells that are one step away.
     ///
-    /// Only the first degree is counted. Two cells are called alike when one
-    /// single thing would make them equal, and otherwise they are not alike
-    /// at all. Each figure below includes the cells that were already equal,
-    /// so the five of them nest rather than crossing over.
-    pub cells: Option<f32>,
-    /// Cells equal after changing at most one tile.
-    pub cells_one_tile: Option<f32>,
-    /// Cells equal after one rotation, of a quarter, a half or three
-    /// quarters. Any multiple of ninety degrees is one rotation; a half turn
-    /// is not counted as two quarter ones.
-    pub cells_one_turn: Option<f32>,
-    /// Cells equal after mirroring on one axis through the middle, at
-    /// forty-five degree increments: across, down, or either diagonal.
-    pub cells_one_mirror: Option<f32>,
-    /// Cells equal after walking one tile along one axis, wrapping round the
-    /// cell edges.
-    ///
-    /// A walked cell is often not a legal cell at all, because walking moves
-    /// the centre tile and a walled centre is illegal. It still happens: 274
-    /// pairs of legal cells are walks of each other, slightly more than the
-    /// 227 related by a rotation.
-    pub cells_one_walk: Option<f32>,
-    /// Cells alike by any of the four: one single thing would make them
-    /// equal. Anything beyond that is not alike at all.
-    pub cells_similar: Option<f32>,
+    /// These overlap. A cell can be reachable by a mirror and by a rotation
+    /// at once, and is counted under both; they say what kind of step is
+    /// available, not how many steps there are.
+    pub by_tile: u64,
+    pub by_turn: u64,
+    pub by_mirror: u64,
+    pub by_walk: u64,
     /// Overlap of the two local-pattern mixes — how far the place is made of
     /// the same small shapes, wherever those sit. Position-blind.
     pub texture: f32,
@@ -157,16 +147,40 @@ pub struct Report {
 impl Report {
     /// The figures in the order they are worth reading, with a label for each.
     /// `None` where a figure does not apply to this size.
-    /// The ways one cell can be the same shape as another. Read these first.
-    pub fn patterns(&self) -> [(&'static str, Option<f32>); 6] {
-        [
-            ("already equal", self.cells),
-            ("one tile changed", self.cells_one_tile),
-            ("one rotation", self.cells_one_turn),
-            ("one mirror", self.cells_one_mirror),
-            ("one walk", self.cells_one_walk),
-            ("alike at all", self.cells_similar),
-        ]
+    /// How many single steps would make the two units equal, counting the
+    /// cells where one step is enough.
+    ///
+    /// Exact when [`Report::is_exact`] holds. Otherwise some cells are
+    /// further away than one step and this is only part of the answer, so
+    /// read [`Report::at_least`] instead.
+    pub fn steps(&self) -> u64 {
+        self.one_step
+    }
+
+    /// Whether every cell is within one step, so `steps` is the whole truth.
+    pub fn is_exact(&self) -> bool {
+        self.beyond == 0
+    }
+
+    /// A floor on the real distance. Each cell past the first degree needs at
+    /// least two steps, so this is the least it could possibly be.
+    pub fn at_least(&self) -> u64 {
+        self.one_step + self.beyond * 2
+    }
+
+    /// The step count written the way it should be said out loud.
+    pub fn distance(&self) -> String {
+        if self.cells == 0 {
+            "no cells to compare".to_string()
+        } else if self.beyond == 0 {
+            format!("{} {} apart", self.steps(), plural(self.steps()))
+        } else {
+            format!(
+                "at least {} {} apart",
+                self.at_least(),
+                plural(self.at_least())
+            )
+        }
     }
 
     /// Bulk measures over the whole unit. They move smoothly and are good for
@@ -193,12 +207,14 @@ pub fn compare(a: &Grid, b: &Grid) -> Report {
             tiles: 0.0,
             turned: 0.0,
             motion: Rigid::None,
-            cells: None,
-            cells_one_tile: None,
-            cells_one_turn: None,
-            cells_one_mirror: None,
-            cells_one_walk: None,
-            cells_similar: None,
+            cells: 0,
+            equal: 0,
+            one_step: 0,
+            beyond: 0,
+            by_tile: 0,
+            by_turn: 0,
+            by_mirror: 0,
+            by_walk: 0,
             texture: 0.0,
             openness: 0.0,
             loops: 0.0,
@@ -215,18 +231,20 @@ pub fn compare(a: &Grid, b: &Grid) -> Report {
         }
     }
 
-    let tally = classify_cells(a, b);
+    let tally = count_steps(a, b);
 
     Report {
         tiles: tile_agreement(a, b),
         turned,
         motion,
-        cells: tally.map(|t| percent(t.identical, t.total)),
-        cells_one_tile: tally.map(|t| percent(t.one_tile, t.total)),
-        cells_one_turn: tally.map(|t| percent(t.one_turn, t.total)),
-        cells_one_mirror: tally.map(|t| percent(t.one_mirror, t.total)),
-        cells_one_walk: tally.map(|t| percent(t.one_walk, t.total)),
-        cells_similar: tally.map(|t| percent(t.similar, t.total)),
+        cells: tally.cells,
+        equal: tally.equal,
+        one_step: tally.one_step,
+        beyond: tally.beyond,
+        by_tile: tally.by_tile,
+        by_turn: tally.by_turn,
+        by_mirror: tally.by_mirror,
+        by_walk: tally.by_walk,
         texture: texture_overlap(a, b),
         openness: openness_agreement(a, b),
         loops: loop_agreement(a, b),
@@ -303,34 +321,43 @@ pub fn slid_cell(bits: u16, dx: u32, dy: u32) -> u16 {
     out
 }
 
-/// How two units line up cell by cell, counted every way one single thing
-/// could make a pair of cells equal.
-#[derive(Clone, Copy)]
-struct CellTally {
-    identical: u64,
-    one_tile: u64,
-    one_turn: u64,
-    one_mirror: u64,
-    one_walk: u64,
-    similar: u64,
-    total: u64,
+/// How far apart two units are, cell by cell, in single steps.
+#[derive(Clone, Copy, Default)]
+struct StepTally {
+    cells: u64,
+    equal: u64,
+    one_step: u64,
+    beyond: u64,
+    by_tile: u64,
+    by_turn: u64,
+    by_mirror: u64,
+    by_walk: u64,
 }
 
-/// `None` when the unit is smaller than a single cell and so has none.
-fn classify_cells(a: &Grid, b: &Grid) -> Option<CellTally> {
+/// Whether one single thing would make `right` equal to `left`, and which.
+///
+/// All four are one step. A mirror is no further away than a changed tile,
+/// which is the whole reason this returns a set of ways rather than a rank.
+fn one_step_away(left: u16, right: u16) -> (bool, bool, bool, bool) {
+    (
+        (left ^ right).count_ones() == 1,
+        TURNS.iter().any(|&m| transformed_cell(right, m) == left),
+        MIRRORS.iter().any(|&m| transformed_cell(right, m) == left),
+        WALKS
+            .iter()
+            .any(|&(dx, dy)| slid_cell(right, dx, dy) == left),
+    )
+}
+
+fn count_steps(a: &Grid, b: &Grid) -> StepTally {
     let side = a.side();
     if side < 3 {
-        return None;
+        return StepTally::default();
     }
     let across = side / 3;
-    let mut tally = CellTally {
-        identical: 0,
-        one_tile: 0,
-        one_turn: 0,
-        one_mirror: 0,
-        one_walk: 0,
-        similar: 0,
-        total: u64::from(across) * u64::from(across),
+    let mut tally = StepTally {
+        cells: u64::from(across) * u64::from(across),
+        ..StepTally::default()
     };
 
     for cy in 0..across {
@@ -338,30 +365,24 @@ fn classify_cells(a: &Grid, b: &Grid) -> Option<CellTally> {
             let left = cell_bits(a, cx * 3, cy * 3);
             let right = cell_bits(b, cx * 3, cy * 3);
 
-            // Each figure allows doing nothing as well, so the five nest:
-            // already equal is below each of the others, and all are below
-            // alike at all. Without that, a unit compared with itself would
-            // read 100 on the first and almost nothing on the rest, which
-            // looks broken rather than informative.
-            let identical = left == right;
-            let one_tile = (left ^ right).count_ones() <= 1;
-            let one_turn = identical || TURNS.iter().any(|&m| transformed_cell(right, m) == left);
-            let one_mirror =
-                identical || MIRRORS.iter().any(|&m| transformed_cell(right, m) == left);
-            let one_walk = identical
-                || WALKS
-                    .iter()
-                    .any(|&(dx, dy)| slid_cell(right, dx, dy) == left);
+            if left == right {
+                tally.equal += 1;
+                continue;
+            }
 
-            tally.identical += u64::from(identical);
-            tally.one_tile += u64::from(one_tile);
-            tally.one_turn += u64::from(one_turn);
-            tally.one_mirror += u64::from(one_mirror);
-            tally.one_walk += u64::from(one_walk);
-            tally.similar += u64::from(one_tile || one_turn || one_mirror || one_walk);
+            let (tile, turn, mirror, walk) = one_step_away(left, right);
+            if tile || turn || mirror || walk {
+                tally.one_step += 1;
+                tally.by_tile += u64::from(tile);
+                tally.by_turn += u64::from(turn);
+                tally.by_mirror += u64::from(mirror);
+                tally.by_walk += u64::from(walk);
+            } else {
+                tally.beyond += 1;
+            }
         }
     }
-    Some(tally)
+    tally
 }
 
 /// Count of every 3x3 neighbourhood shape in the grid. Outside counts as
@@ -440,6 +461,11 @@ fn loop_agreement(a: &Grid, b: &Grid) -> f32 {
         return 100.0;
     }
     percent(scale - left.abs_diff(right), scale)
+}
+
+/// "step" or "steps", so the panel does not say "1 steps apart".
+fn plural(count: u64) -> &'static str {
+    if count == 1 { "step" } else { "steps" }
 }
 
 fn percent(part: u64, whole: u64) -> f32 {
@@ -599,174 +625,175 @@ mod tests {
         out
     }
 
-    // ---- first-degree likeness ----------------------------------------
+    // ---- distance, in steps ------------------------------------------
+
+    /// The same unit with one named cell put through `change`, so steps can
+    /// be counted one at a time rather than all at once.
+    fn one_cell(grid: &Grid, cx: u32, cy: u32, change: impl Fn(u16) -> u16) -> Grid {
+        let mut out = grid.clone();
+        let bits = change(cell_bits(grid, cx * 3, cy * 3));
+        for i in 0..9u32 {
+            out.set_wall(cx * 3 + i % 3, cy * 3 + i / 3, bits & (1 << i) != 0);
+        }
+        out
+    }
 
     #[test]
-    fn a_unit_is_already_equal_to_itself() {
+    fn a_unit_is_no_steps_from_itself() {
         let grid = unit(Level::House, 7);
         let report = compare(&grid, &grid);
-        for (label, value) in report.patterns() {
-            assert_eq!(
-                value,
-                Some(100.0),
-                "{label} did not read 100 comparing a unit with itself"
-            );
-        }
-        for (label, value) in report.background() {
-            assert!(
-                (value - 100.0).abs() < 0.001,
-                "{label} scored {value} comparing a unit with itself"
-            );
-        }
+        assert_eq!(report.steps(), 0);
+        assert!(report.is_exact());
+        assert_eq!(report.equal, report.cells);
+        assert_eq!(report.distance(), "0 steps apart");
     }
 
     #[test]
-    fn one_tile_changed_is_alike_but_not_equal() {
-        let grid = unit(Level::House, 41);
-        let mut nudged = grid.clone();
-        nudged.set_wall(4, 4, !grid.is_wall(4, 4));
-        let report = compare(&grid, &nudged);
+    fn one_mirror_is_exactly_as_near_as_one_changed_tile() {
+        // The point of counting steps rather than shares. A mirrored cell is
+        // not a different kind of likeness from a cell with one tile moved;
+        // it is the same distance, and distance is the measure.
+        let grid = unit(Level::Room, 14);
 
-        assert_eq!(report.cells_one_tile, Some(100.0));
-        assert_eq!(report.cells_similar, Some(100.0));
-        assert!(
-            report.cells.is_some_and(|v| v < 100.0),
-            "the changed cell should not count as already equal"
+        let mirrored = one_cell(&grid, 0, 0, |bits| transformed_cell(bits, Rigid::MirrorX));
+        let flipped = one_cell(&grid, 0, 0, |bits| bits ^ 1);
+
+        let by_mirror = compare(&grid, &mirrored);
+        let by_tile = compare(&grid, &flipped);
+
+        assert_eq!(by_mirror.steps(), 1, "a mirror should be one step");
+        assert_eq!(by_tile.steps(), 1, "a changed tile should be one step");
+        assert_eq!(
+            by_mirror.steps(),
+            by_tile.steps(),
+            "a mirror and a changed tile are the same distance"
         );
+        assert!(by_mirror.is_exact() && by_tile.is_exact());
     }
 
     #[test]
-    fn two_tiles_changed_is_not_alike_at_all() {
-        // The whole point of stopping at the first degree: two changes is not
-        // "slightly less similar", it is not similar.
-        let grid = unit(Level::Cell, 12);
-        let mut far = grid.clone();
-        let mut changed = 0;
-        for i in 0..9u32 {
-            let (x, y) = (i % 3, i / 3);
-            if (x, y) != (1, 1) && changed < 2 {
-                far.set_wall(x, y, !grid.is_wall(x, y));
-                changed += 1;
-            }
-        }
-        assert_eq!(changed, 2);
-        let report = compare(&grid, &far);
-        assert_eq!(report.cells_one_tile, Some(0.0));
-        assert_eq!(report.cells, Some(0.0));
-    }
-
-    #[test]
-    fn every_rotation_is_one_rotation() {
-        // A half turn is one rotation, not two quarter ones.
-        let grid = unit(Level::House, 17);
+    fn every_single_thing_is_one_step() {
+        let grid = unit(Level::Room, 21);
+        let mut cases: Vec<(String, Grid)> = vec![(
+            "one changed tile".to_string(),
+            one_cell(&grid, 1, 1, |bits| bits ^ 1),
+        )];
         for motion in TURNS {
-            let other = per_cell(&grid, |bits| transformed_cell(bits, motion));
-            let report = compare(&grid, &other);
-            assert_eq!(
-                report.cells_one_turn,
-                Some(100.0),
-                "{} was not counted as one rotation",
-                motion.name()
-            );
-            assert_eq!(report.cells_similar, Some(100.0));
+            cases.push((
+                format!("a rotation, {}", motion.name()),
+                one_cell(&grid, 1, 1, |bits| transformed_cell(bits, motion)),
+            ));
         }
-    }
-
-    #[test]
-    fn every_axis_through_the_middle_is_one_mirror() {
-        let grid = unit(Level::House, 19);
         for motion in MIRRORS {
-            let other = per_cell(&grid, |bits| transformed_cell(bits, motion));
-            let report = compare(&grid, &other);
-            assert_eq!(
-                report.cells_one_mirror,
-                Some(100.0),
-                "{} was not counted as one mirror",
-                motion.name()
-            );
-            assert_eq!(report.cells_similar, Some(100.0));
+            cases.push((
+                format!("a mirror, {}", motion.name()),
+                one_cell(&grid, 1, 1, |bits| transformed_cell(bits, motion)),
+            ));
         }
-    }
-
-    #[test]
-    fn a_walk_along_one_axis_is_one_walk() {
-        let grid = unit(Level::House, 23);
         for (dx, dy) in WALKS {
-            let other = per_cell(&grid, |bits| slid_cell(bits, dx, dy));
+            cases.push((
+                format!("a walk of ({dx}, {dy})"),
+                one_cell(&grid, 1, 1, |bits| slid_cell(bits, dx, dy)),
+            ));
+        }
+
+        for (name, other) in cases {
             let report = compare(&grid, &other);
-            assert_eq!(
-                report.cells_one_walk,
-                Some(100.0),
-                "a walk of ({dx}, {dy}) was not counted as one walk"
+            // A cell can be symmetric, in which case the change did nothing
+            // at all and the honest answer is zero rather than one.
+            assert!(
+                report.steps() <= 1 && report.is_exact(),
+                "{name} came out {} steps away, exact: {}",
+                report.steps(),
+                report.is_exact()
             );
         }
     }
 
     #[test]
-    fn a_walk_along_both_axes_is_not_one_walk() {
-        // Two walks is two things, so it is not alike at the first degree.
-        // If this ever passed, "one walk" would quietly mean "up to two".
-        let grid = unit(Level::Cell, 31);
-        let diagonal = per_cell(&grid, |bits| slid_cell(bits, 1, 1));
-        let report = compare(&grid, &diagonal);
-        if report.cells == Some(0.0) {
-            assert_eq!(
-                report.cells_one_walk,
-                Some(0.0),
-                "a diagonal walk was counted as a single walk"
-            );
-        }
+    fn two_things_is_further_than_one_step() {
+        // Recognition is close to all-or-nothing. Two changes is not "a bit
+        // less similar"; it is past where the first degree reaches, and the
+        // report has to say so rather than quietly rounding it in.
+        let grid = unit(Level::Room, 12);
+        let two_tiles = one_cell(&grid, 2, 2, |bits| bits ^ 0b0000_0011);
+        let report = compare(&grid, &two_tiles);
+
+        assert_eq!(report.one_step, 0);
+        assert_eq!(report.beyond, 1);
+        assert!(!report.is_exact());
+        assert!(report.distance().starts_with("at least"));
+        assert!(report.at_least() >= 2);
     }
 
     #[test]
-    fn the_five_figures_nest() {
-        // Each allows everything "already equal" allows and more, and all of
-        // them are below "alike at all". Numbers that crossed would make the
-        // screen lie about what allowing a rotation buys you.
+    fn a_half_turn_is_one_step_not_two() {
+        let grid = unit(Level::Room, 17);
+        let half = one_cell(&grid, 0, 1, |bits| transformed_cell(bits, Rigid::Turn180));
+        let report = compare(&grid, &half);
+        assert!(
+            report.is_exact(),
+            "a half turn was counted as more than one step"
+        );
+        assert!(report.steps() <= 1);
+    }
+
+    #[test]
+    fn steps_add_up_across_cells() {
+        // Three cells, each one thing away by a different kind. Three steps.
+        let grid = unit(Level::House, 5);
+        let mut other = one_cell(&grid, 0, 0, |bits| bits ^ 1);
+        other = one_cell(&other, 1, 0, |bits| transformed_cell(bits, Rigid::Turn90));
+        other = one_cell(&other, 2, 0, |bits| transformed_cell(bits, Rigid::MirrorX));
+
+        let report = compare(&grid, &other);
+        assert!(report.is_exact(), "something landed further than one step");
+        assert_eq!(
+            report.steps(),
+            report.one_step,
+            "steps and one-step cells must agree"
+        );
+        assert!(
+            report.steps() <= 3,
+            "three single things came out as {} steps",
+            report.steps()
+        );
+        assert_eq!(report.equal + report.one_step + report.beyond, report.cells);
+    }
+
+    #[test]
+    fn the_breakdown_never_exceeds_the_cells_it_describes() {
+        // by_* overlap, so each is at most the number of one-step cells, and
+        // together they are at least that many.
         for seed in 0..12u64 {
             let a = unit(Level::House, seed);
             let b = unit(Level::House, seed + 60);
             let r = compare(&a, &b);
-            let (Some(equal), Some(any)) = (r.cells, r.cells_similar) else {
-                panic!("a house has cells");
-            };
-            for (label, value) in r.patterns() {
-                let Some(value) = value else {
-                    panic!("a house has cells");
-                };
+            for (label, count) in [
+                ("by_tile", r.by_tile),
+                ("by_turn", r.by_turn),
+                ("by_mirror", r.by_mirror),
+                ("by_walk", r.by_walk),
+            ] {
                 assert!(
-                    value >= equal - 0.001,
-                    "{label} scored {value}, below already-equal at {equal}"
-                );
-                assert!(
-                    value <= any + 0.001,
-                    "{label} scored {value}, above alike-at-all at {any}"
+                    count <= r.one_step,
+                    "{label} counted {count} of {} one-step cells",
+                    r.one_step
                 );
             }
+            assert!(r.by_tile + r.by_turn + r.by_mirror + r.by_walk >= r.one_step);
+            assert_eq!(r.equal + r.one_step + r.beyond, r.cells);
         }
     }
 
     #[test]
-    fn every_figure_stays_inside_nought_to_a_hundred() {
+    fn at_least_is_never_below_the_steps_counted() {
         for seed in 0..12u64 {
-            let a = unit(Level::Room, seed);
-            let b = unit(Level::Room, seed + 100);
-            let report = compare(&a, &b);
-            for (label, value) in report.patterns() {
-                let Some(value) = value else {
-                    panic!("a room has cells");
-                };
-                assert!(
-                    (0.0..=100.0).contains(&value),
-                    "{label} returned {value}, which is not a percentage"
-                );
-            }
-            for (label, value) in report.background() {
-                assert!(
-                    (0.0..=100.0).contains(&value),
-                    "{label} returned {value}, which is not a percentage"
-                );
-            }
+            let a = unit(Level::House, seed);
+            let b = unit(Level::House, seed + 90);
+            let r = compare(&a, &b);
+            assert!(r.at_least() >= r.steps());
+            assert_eq!(r.is_exact(), r.at_least() == r.steps());
         }
     }
 
@@ -776,7 +803,7 @@ mod tests {
         let there_and_back = per_cell(&grid, |bits| {
             slid_cell(slid_cell(slid_cell(bits, 1, 2), 1, 2), 1, 2)
         });
-        assert_eq!(compare(&grid, &there_and_back).cells, Some(100.0));
+        assert_eq!(compare(&grid, &there_and_back).steps(), 0);
     }
 
     #[test]
@@ -789,26 +816,17 @@ mod tests {
     }
 
     #[test]
-    fn a_shape_is_noticed_where_a_tile_count_is_not() {
-        // Rotate every cell in place. The whole-unit tile figure falls away
-        // while the rotation figure still reads 100. That gap is the entire
-        // reason these are separate figures.
-        let grid = unit(Level::House, 37);
-        let turned = per_cell(&grid, |bits| transformed_cell(bits, Rigid::Turn90));
-        let report = compare(&grid, &turned);
-        assert_eq!(report.cells_one_turn, Some(100.0));
-        assert!(
-            report.tiles < 95.0,
-            "tiles scored {}, so the tile count saw the rotation after all",
-            report.tiles
-        );
+    fn a_unit_smaller_than_a_cell_has_nothing_to_measure() {
+        let report = compare(&unit(Level::Tile, 1), &unit(Level::Tile, 2));
+        assert_eq!(report.cells, 0);
+        assert_eq!(report.distance(), "no cells to compare");
     }
 
     #[test]
     fn different_sizes_have_nothing_to_compare() {
         let report = compare(&unit(Level::Room, 1), &unit(Level::House, 1));
         assert_eq!(report.tiles, 0.0);
-        assert!(report.cells_similar.is_none());
+        assert_eq!(report.cells, 0);
     }
 
     // ---- whole-unit motions -------------------------------------------
