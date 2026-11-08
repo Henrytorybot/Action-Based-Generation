@@ -13,6 +13,7 @@
 //! texture; this gives architecture.
 
 pub mod cells;
+pub mod similarity;
 
 use std::collections::HashMap;
 
@@ -23,10 +24,131 @@ use std::collections::HashMap;
 /// moves one cell to a legal neighbour of itself — a single tile different —
 /// so the count is a budget for how wrong a place is allowed to look. Nothing
 /// is stored for untouched cells, which is almost all of them.
+/// One kind of change the space can make to a cell. Each is a single step,
+/// the same step the comparison counts degrees in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// Move to a legal cell one tile different. The gentlest change there is.
+    Flip,
+    /// Turn a quarter clockwise.
+    Turn,
+    /// Mirror left to right.
+    Mirror,
+    /// Slide by `(dx, dy)`, wrapping round the cell edges.
+    Slide(u8, u8),
+}
+
+impl Kind {
+    /// The four slides that are genuinely one step: one tile, one direction.
+    ///
+    /// A slide of (1, 1) is two steps, not one, because it moves along both
+    /// axes. Anything offering "walk once" has to pick from these, or the
+    /// degree the comparison reports will not be the degree that was asked
+    /// for.
+    pub const SINGLE_SLIDES: [Kind; 4] = [
+        Kind::Slide(1, 0),
+        Kind::Slide(2, 0),
+        Kind::Slide(0, 1),
+        Kind::Slide(0, 2),
+    ];
+}
+
+/// Which kinds the space is allowed to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kinds {
+    pub flip: bool,
+    pub turn: bool,
+    pub mirror: bool,
+    pub slide: bool,
+}
+
+impl Kinds {
+    /// Only single-tile walks: what the generator could do before turns,
+    /// mirrors and slides existed.
+    pub const FLIPS_ONLY: Kinds = Kinds {
+        flip: true,
+        turn: false,
+        mirror: false,
+        slide: false,
+    };
+
+    pub const ALL: Kinds = Kinds {
+        flip: true,
+        turn: true,
+        mirror: true,
+        slide: true,
+    };
+
+    /// The allowed kinds, for picking one at random. A slide comes back with
+    /// a placeholder offset for the caller to replace.
+    pub fn list(self) -> Vec<Kind> {
+        let mut out = Vec::new();
+        if self.flip {
+            out.push(Kind::Flip);
+        }
+        if self.turn {
+            out.push(Kind::Turn);
+        }
+        if self.mirror {
+            out.push(Kind::Mirror);
+        }
+        if self.slide {
+            out.push(Kind::Slide(1, 0));
+        }
+        out
+    }
+
+    pub fn any(self) -> bool {
+        self.flip || self.turn || self.mirror || self.slide
+    }
+}
+
+impl Default for Kinds {
+    fn default() -> Self {
+        Kinds::FLIPS_ONLY
+    }
+}
+
+/// Everything that has happened to one cell.
+///
+/// Turning and mirroring are always safe: the legal alphabet is closed under
+/// them, so the centre stays open and corridor carving still lands. Sliding is
+/// not, which is why it is stored as an intention and checked when applied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Change {
+    /// Single-tile walks through the legal alphabet.
+    pub flips: u32,
+    /// Quarter turns clockwise, taken modulo four.
+    pub turns: u8,
+    /// Whether the cell is mirrored. With `turns` this reaches all eight ways
+    /// a square can be set down.
+    pub mirror: bool,
+    /// Slide offsets, each modulo three.
+    pub slide: (u8, u8),
+}
+
+impl Change {
+    /// How many single steps this amounts to, counted the way the comparison
+    /// counts degrees: a slide of two is one step back the other way.
+    pub fn steps(&self) -> u32 {
+        let turns = u32::from(self.turns % 4);
+        let (dx, dy) = (u32::from(self.slide.0 % 3), u32::from(self.slide.1 % 3));
+        self.flips
+            + turns.min(4 - turns) % 4
+            + u32::from(self.mirror)
+            + dx.min(3 - dx)
+            + dy.min(3 - dy)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Change::default()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Nudges {
     /// Keyed by the cell's top-left tile, which is always a multiple of three.
-    steps: HashMap<(u32, u32), u32>,
+    changes: HashMap<(u32, u32), Change>,
 }
 
 impl Nudges {
@@ -34,35 +156,79 @@ impl Nudges {
         Self::default()
     }
 
-    /// How far the cell containing `(x, y)` has been pushed.
-    pub fn steps_at(&self, x: u32, y: u32) -> u32 {
-        self.steps
+    /// Everything that has happened to the cell containing `(x, y)`.
+    pub fn change_at(&self, x: u32, y: u32) -> Change {
+        self.changes
             .get(&(x - x % 3, y - y % 3))
             .copied()
-            .unwrap_or(0)
+            .unwrap_or_default()
     }
 
-    /// Push the cell containing `(x, y)` one step further.
+    /// How many single-tile walks the cell containing `(x, y)` has taken.
+    pub fn steps_at(&self, x: u32, y: u32) -> u32 {
+        self.change_at(x, y).flips
+    }
+
+    fn entry(&mut self, x: u32, y: u32) -> &mut Change {
+        self.changes.entry((x - x % 3, y - y % 3)).or_default()
+    }
+
+    /// Walk the cell containing `(x, y)` one more legal single-tile step.
     pub fn push(&mut self, x: u32, y: u32) {
-        *self.steps.entry((x - x % 3, y - y % 3)).or_insert(0) += 1;
+        self.entry(x, y).flips += 1;
+    }
+
+    /// Turn it another quarter.
+    pub fn turn(&mut self, x: u32, y: u32) {
+        let change = self.entry(x, y);
+        change.turns = (change.turns + 1) % 4;
+    }
+
+    /// Mirror it, or put it back if it was already mirrored.
+    pub fn mirror(&mut self, x: u32, y: u32) {
+        let change = self.entry(x, y);
+        change.mirror = !change.mirror;
+    }
+
+    /// Slide it further by `(dx, dy)`, wrapping.
+    pub fn slide(&mut self, x: u32, y: u32, dx: u8, dy: u8) {
+        let change = self.entry(x, y);
+        change.slide.0 = (change.slide.0 + dx) % 3;
+        change.slide.1 = (change.slide.1 + dy) % 3;
+    }
+
+    /// Apply one change of the given kind.
+    pub fn apply(&mut self, x: u32, y: u32, kind: Kind) {
+        match kind {
+            Kind::Flip => self.push(x, y),
+            Kind::Turn => self.turn(x, y),
+            Kind::Mirror => self.mirror(x, y),
+            Kind::Slide(dx, dy) => self.slide(x, y, dx, dy),
+        }
     }
 
     /// How many cells have been touched at all.
     pub fn touched_cells(&self) -> usize {
-        self.steps.len()
+        self.changes.len()
     }
 
-    /// Every step applied so far, across all cells.
+    /// Every single step applied, of every kind, across all cells.
     pub fn total_steps(&self) -> u32 {
-        self.steps.values().sum()
+        self.changes.values().map(Change::steps).sum()
+    }
+
+    /// Bytes held by the record of what has changed. Untouched cells cost
+    /// nothing, which is almost all of them.
+    pub fn bytes(&self) -> usize {
+        self.changes.len() * (std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<Change>())
     }
 
     pub fn clear(&mut self) {
-        self.steps.clear();
+        self.changes.clear();
     }
 
     pub fn is_empty(&self) -> bool {
-        self.steps.is_empty()
+        self.changes.is_empty()
     }
 }
 
@@ -384,19 +550,44 @@ fn fill_cell(grid: &mut Grid, x0: u32, y0: u32, params: &Params, nudges: &Nudges
     let mut rng = seed_at(params, 1, x0, y0);
     let mut bits = candidates[(next(&mut rng) % candidates.len() as u64) as usize];
 
+    let change = nudges.change_at(x0, y0);
+
     // Walk away from that cell, one legal single-tile change at a time.
     //
     // Each step lands on a cell differing by exactly one tile, and every one
     // is legal, so the centre stays open and nothing inside gets sealed off.
     // Steps can undo each other, so n steps means *at most* n tiles different,
     // not exactly n.
-    for step in 0..nudges.steps_at(x0, y0) {
+    for step in 0..change.flips {
         let neighbours = cells::legal_neighbours(bits);
         if neighbours.is_empty() {
             break;
         }
         let mut walk = seed_at(params, 1, x0, y0) ^ (u64::from(step) + 1).wrapping_mul(0x9E37_79B9);
         bits = neighbours[(next(&mut walk) % neighbours.len() as u64) as usize];
+    }
+
+    // Turning and mirroring need no check. The legal alphabet is closed under
+    // the eight ways a square can be set down, so the centre is still open and
+    // nothing has been sealed off.
+    for _ in 0..(change.turns % 4) {
+        bits = similarity::transformed_cell(bits, similarity::Rigid::Turn90);
+    }
+    if change.mirror {
+        bits = similarity::transformed_cell(bits, similarity::Rigid::MirrorX);
+    }
+
+    // Sliding does need one. It moves the centre tile, and a cell with a
+    // walled centre is not legal — roughly half of all slides have to be
+    // refused. A refused slide leaves the cell where it was rather than
+    // substituting something else, so the space never produces a unit the
+    // player could be sealed inside.
+    let (dx, dy) = (u32::from(change.slide.0 % 3), u32::from(change.slide.1 % 3));
+    if dx != 0 || dy != 0 {
+        let slid = similarity::slid_cell(bits, dx, dy);
+        if cells::is_legal(slid) {
+            bits = slid;
+        }
     }
 
     for i in 0..9 {
@@ -733,5 +924,336 @@ mod tests {
         assert_eq!(nudges.total_steps(), 2);
         assert_eq!(nudges.steps_at(6, 6), 2);
         assert_eq!(nudges.steps_at(9, 9), 0);
+    }
+
+    // ---- turns, mirrors and slides as changes the space can make --------
+
+    /// A cell on its own: no corridor is carved over it, so what the change
+    /// did is exactly what you can read back out.
+    fn bare_cell(seed: u64, nudges: &Nudges) -> u16 {
+        let params = Params {
+            seed,
+            ..Params::default()
+        };
+        let grid = generate_with(Level::Cell, &params, nudges);
+        let mut bits = 0u16;
+        for i in 0..9u32 {
+            if grid.is_wall(i % 3, i / 3) {
+                bits |= 1 << i;
+            }
+        }
+        bits
+    }
+
+    #[test]
+    fn a_turn_really_turns_the_cell() {
+        for seed in 0..40u64 {
+            let before = bare_cell(seed, &Nudges::new());
+            let mut nudges = Nudges::new();
+            nudges.turn(0, 0);
+            let after = bare_cell(seed, &nudges);
+            assert_eq!(
+                after,
+                similarity::transformed_cell(before, similarity::Rigid::Turn90),
+                "seed {seed}: a turn did not produce the turned cell"
+            );
+            assert!(
+                cells::is_legal(after),
+                "seed {seed}: turning made it illegal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mirror_really_mirrors_the_cell() {
+        for seed in 0..40u64 {
+            let before = bare_cell(seed, &Nudges::new());
+            let mut nudges = Nudges::new();
+            nudges.mirror(0, 0);
+            let after = bare_cell(seed, &nudges);
+            assert_eq!(
+                after,
+                similarity::transformed_cell(before, similarity::Rigid::MirrorX),
+                "seed {seed}: a mirror did not produce the mirrored cell"
+            );
+            assert!(cells::is_legal(after));
+        }
+    }
+
+    #[test]
+    fn a_slide_is_taken_or_refused_but_never_breaks_the_cell() {
+        // Sliding moves the centre tile, and a walled centre is illegal. A
+        // slide that would do that has to be refused outright: substituting
+        // something else would be a change the player never asked for, and
+        // taking it anyway could seal them in.
+        let mut taken = 0;
+        let mut refused = 0;
+        for seed in 0..60u64 {
+            let before = bare_cell(seed, &Nudges::new());
+            for step in 1..9u32 {
+                let (dx, dy) = (step % 3, step / 3);
+                let mut nudges = Nudges::new();
+                nudges.slide(0, 0, dx as u8, dy as u8);
+                let after = bare_cell(seed, &nudges);
+
+                let slid = similarity::slid_cell(before, dx, dy);
+                if cells::is_legal(slid) {
+                    assert_eq!(after, slid, "a legal slide was not taken");
+                    taken += 1;
+                } else {
+                    assert_eq!(after, before, "an illegal slide was not refused");
+                    refused += 1;
+                }
+                assert!(cells::is_legal(after), "a slide left an illegal cell");
+            }
+        }
+        assert!(taken > 0 && refused > 0, "expected both outcomes to occur");
+    }
+
+    #[test]
+    fn turning_four_times_is_no_change_at_all() {
+        let before = bare_cell(5, &Nudges::new());
+        let mut nudges = Nudges::new();
+        for _ in 0..4 {
+            nudges.turn(0, 0);
+        }
+        assert_eq!(bare_cell(5, &nudges), before);
+        assert_eq!(nudges.total_steps(), 0, "four turns should cost no steps");
+    }
+
+    #[test]
+    fn every_kind_of_change_leaves_one_connected_space() {
+        // The whole point of the legality rules. Turning and mirroring are
+        // closed over the alphabet; a slide that would break it is refused.
+        // If any of that were wrong, a player could be sealed into a pocket
+        // of a unit with no way out.
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut roll = move || {
+            rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = rng;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+
+        for level in [Level::Cell, Level::Room, Level::House, Level::Lot] {
+            let side = level.side();
+            for seed in 0..6u64 {
+                let params = Params {
+                    seed,
+                    openness: (roll() % 256) as u8,
+                    connectivity: (roll() % 256) as u8,
+                    nudge: 0,
+                };
+                let mut nudges = Nudges::new();
+                for _ in 0..(side * side / 4).max(4) {
+                    let x = (roll() % u64::from(side)) as u32;
+                    let y = (roll() % u64::from(side)) as u32;
+                    match roll() % 4 {
+                        0 => nudges.push(x, y),
+                        1 => nudges.turn(x, y),
+                        2 => nudges.mirror(x, y),
+                        _ => {
+                            let step = 1 + roll() % 8;
+                            nudges.slide(x, y, (step % 3) as u8, (step / 3) as u8);
+                        }
+                    }
+                }
+                let grid = generate_with(level, &params, &nudges);
+                assert!(
+                    grid.is_fully_connected(),
+                    "{} seed {seed}: {} of {} open tiles reachable after {} changes",
+                    level.name(),
+                    grid.reachable_from_centre(),
+                    grid.open_tiles(),
+                    nudges.total_steps()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_change_of_any_kind_stays_inside_its_own_cell() {
+        let params = Params::default();
+        let plain = generate(Level::Lot, &params);
+
+        for kind in [Kind::Flip, Kind::Turn, Kind::Mirror, Kind::Slide(1, 1)] {
+            let mut nudges = Nudges::new();
+            nudges.apply(40, 40, kind);
+            let changed = generate_with(Level::Lot, &params, &nudges);
+
+            let (cx, cy) = (40 - 40 % 3, 40 - 40 % 3);
+            for y in 0..Level::Lot.side() {
+                for x in 0..Level::Lot.side() {
+                    let inside = (cx..cx + 3).contains(&x) && (cy..cy + 3).contains(&y);
+                    if !inside {
+                        assert_eq!(
+                            plain.is_wall(x, y),
+                            changed.is_wall(x, y),
+                            "{kind:?} changed ({x}, {y}), outside the cell it was aimed at"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_change_is_exact_in_a_bare_cell_and_partly_covered_above_one() {
+        // Corridors are carved after cells, so above cell level a corridor can
+        // run back over part of a changed cell and open it up again. The change
+        // still happened, but the finished unit no longer reads as one clean
+        // step. Anyone reading the comparison screen has to know that, so it is
+        // pinned here rather than left to be rediscovered.
+        let params = Params::default();
+
+        // A bare cell has nothing carved over it, so a turn is exactly a turn.
+        for seed in 0..20u64 {
+            let p = Params { seed, ..params };
+            let before = generate(Level::Cell, &p);
+            let mut nudges = Nudges::new();
+            nudges.turn(0, 0);
+            let after = generate_with(Level::Cell, &p, &nudges);
+            let turns = similarity::compare(&before, &after)
+                .cell_turns
+                .expect("a cell has one cell");
+            assert_eq!(
+                turns.within[1], 100.0,
+                "seed {seed}: a bare cell did not read back as one turn"
+            );
+        }
+
+        // A house does, and some of its turns get covered.
+        let plain = generate(Level::House, &params);
+        let side = Level::House.side();
+        let mut covered = 0;
+        for cy in 0..side / 3 {
+            for cx in 0..side / 3 {
+                let mut nudges = Nudges::new();
+                nudges.turn(cx * 3, cy * 3);
+                let after = generate_with(Level::House, &params, &nudges);
+                let turns = similarity::compare(&plain, &after)
+                    .cell_turns
+                    .expect("a house has cells");
+                if turns.within[1] < 100.0 {
+                    covered += 1;
+                }
+            }
+        }
+        assert!(
+            covered > 0,
+            "no turn was covered by a corridor, so the UI no longer needs to explain this"
+        );
+    }
+
+    #[test]
+    fn every_single_slide_really_is_one_step() {
+        for kind in Kind::SINGLE_SLIDES {
+            let mut nudges = Nudges::new();
+            nudges.apply(0, 0, kind);
+            assert_eq!(
+                nudges.total_steps(),
+                1,
+                "{kind:?} was offered as one step but costs more"
+            );
+        }
+    }
+
+    #[test]
+    fn a_change_costs_the_steps_the_comparison_would_count() {
+        // `Change::steps` has to agree with how the comparison measures
+        // degrees, or the generator and the screen disagree about how far a
+        // place has moved.
+        let cases = [
+            (
+                Change {
+                    flips: 5,
+                    ..Change::default()
+                },
+                5,
+            ),
+            (
+                Change {
+                    turns: 1,
+                    ..Change::default()
+                },
+                1,
+            ),
+            (
+                Change {
+                    turns: 2,
+                    ..Change::default()
+                },
+                2,
+            ),
+            (
+                Change {
+                    turns: 3,
+                    ..Change::default()
+                },
+                1,
+            ),
+            (
+                Change {
+                    turns: 4,
+                    ..Change::default()
+                },
+                0,
+            ),
+            (
+                Change {
+                    mirror: true,
+                    ..Change::default()
+                },
+                1,
+            ),
+            (
+                Change {
+                    slide: (1, 0),
+                    ..Change::default()
+                },
+                1,
+            ),
+            (
+                Change {
+                    slide: (2, 0),
+                    ..Change::default()
+                },
+                1,
+            ),
+            (
+                Change {
+                    slide: (1, 1),
+                    ..Change::default()
+                },
+                2,
+            ),
+            (
+                Change {
+                    slide: (2, 2),
+                    ..Change::default()
+                },
+                2,
+            ),
+        ];
+        for (change, expected) in cases {
+            assert_eq!(change.steps(), expected, "{change:?}");
+        }
+    }
+
+    #[test]
+    fn what_has_changed_still_costs_almost_nothing_to_remember() {
+        let mut nudges = Nudges::new();
+        for i in 0..100u32 {
+            nudges.turn(i * 3, 0);
+        }
+        assert_eq!(nudges.touched_cells(), 100);
+        // Twelve bytes a cell was the figure before turns, mirrors and slides
+        // existed; they must not have made remembering a change expensive.
+        assert!(
+            nudges.bytes() <= 100 * 24,
+            "a touched cell now costs {} bytes",
+            nudges.bytes() / 100
+        );
     }
 }
