@@ -88,3 +88,33 @@ Template:
   this boundary, and it needs a rule rather than care. This would be wrong if a
   value could be proven to originate in this codebase — but `origin` looked like
   that too.
+
+## 0005 — Generate top-down and carve corridors, rather than hashing tiles
+
+- **Date:** 2026-11-08
+- **Status:** accepted
+- **Decision:** space is produced by descending the 3x3 hierarchy, choosing a
+  legal cell at the bottom and carving a random spanning tree between child
+  centres on the way back up. A tile's value is never computed on its own.
+- **Alternatives:**
+  - *Hash each tile from its coordinates.* O(1) per tile, no recursion, no
+    state. Rejected: it produces noise. Nothing can be larger than one tile,
+    so there are no corridors, no rooms, and no connectivity at all.
+  - *Constraint solving over the whole region (wave-function collapse and
+    relatives).* Much stronger local agreement than this. Rejected for now:
+    it needs global search, can fail and need backtracking, and its cost is
+    not bounded by depth — all of which are hard to reconcile with generating
+    a region on demand with no stored world.
+- **Why:** the thing being built needs the player to form a mental map, so the
+  space has to look like it obeys rules at every scale. Top-down is what
+  produces that: a corridor spans a block because the block decided so, not
+  because adjacent tiles happened to agree.
+
+  Carving centre-to-centre also converts connectivity from a hope into a
+  guarantee. Every unit's centre is open by construction, so every carve lands
+  on open space at both ends, and every open tile ends up reachable from the
+  centre. Cost is O(depth) per unit with no backtracking.
+
+  This would be wrong if the generator ever needed to answer "what is this one
+  tile" without generating its ancestors — a renderer that samples scattered
+  points rather than regions would want the hashing approach instead.

@@ -1,0 +1,14 @@
+[package]
+name = "abg-viewer"
+description = "A window for looking at what the generator produces"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "abg-viewer"
+path = "src/main.rs"
+
+[dependencies]
+abg-gen = { path = "../abg-gen" }
+eframe = "0.31"
+egui = "0.31"

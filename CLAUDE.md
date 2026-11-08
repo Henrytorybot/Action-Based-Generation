@@ -17,11 +17,14 @@ Action-Based-Generation/
 ├── Cargo.toml              workspace root + the `ActionBasedGeneration` package
 ├── src/main.rs             the main crate (still a stub)
 ├── crates/
+│   ├── abg-gen/            the tile-space generator — pure, no dependencies
+│   ├── abg-viewer/         a window for looking at what the generator makes
 │   └── git-ui/             abg-git-ui — desktop window for commit/pull/push
 ├── docs/
 │   ├── PROJECT_MAP.md      what every module owns and how data flows
 │   └── DECISIONS.md        append-only log of decisions and their reasons
 ├── .claude/skills/         project skills — see §9
+├── viewer.cmd              builds + launches the generator viewer (Windows)
 ├── git-ui.cmd              builds + launches the git UI (Windows)
 └── CONTRIBUTING.md         human-facing setup and workflow
 ```

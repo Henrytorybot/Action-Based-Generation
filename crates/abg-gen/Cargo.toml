@@ -1,0 +1,13 @@
+[package]
+name = "abg-gen"
+description = "The tile-space generator: pure, deterministic, no rendering"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "abg_gen"
+path = "src/lib.rs"
+
+# Deliberately no dependencies. Generation has to be reproducible, and the
+# fewer things that can change its output between versions, the better.
+[dependencies]

@@ -5,7 +5,7 @@ What exists, what each piece owns, and how they fit together.
 **Rule:** this file is updated in the same commit that changes the structure it
 describes. See `CLAUDE.md` §6.
 
-Last structural change: 2026-11-07 — workspace created, `git-ui` added.
+Last structural change: 2026-11-08 — `abg-gen` and `abg-viewer` added.
 
 ---
 
@@ -13,43 +13,153 @@ Last structural change: 2026-11-07 — workspace created, `git-ui` added.
 
 ```
 ActionBasedGeneration (root package)   ← the project itself; still a stub
-└── workspace member
+└── workspace members
+    ├── abg-gen                        ← the generator; the actual subject
+    ├── abg-viewer                     ← looks at abg-gen's output
     └── abg-git-ui                     ← developer tool, not part of the product
 ```
 
-The workspace has two independent halves. The root package is the thing being
-built. `crates/git-ui` is tooling for working on it and ships to nobody — it
-must never become a dependency of the root package.
+`abg-gen` is the project. `abg-viewer` exists to look at it. `crates/git-ui` is
+tooling for working on the repository and ships to nobody — it must never
+become a dependency of anything else here.
 
 ---
 
-## `ActionBasedGeneration` — the root package
+## The space being generated
+
+Enough of the design is settled to write down. The rest is marked as open
+rather than guessed at.
+
+**Settled:**
+
+- The world is a grid of tiles. A tile is **one bit**: wall, or open space.
+- Levels are **3×3 of the level below**, so level *k* is 3^k tiles across:
+  `tile, cell, room, house, lot, block, neighborhood, district, town, city,
+  metropolis, region, state, country, subcontinent, continent, hemisphere,
+  planet`. The names are identifiers, not descriptions.
+- **Nothing is stored.** A planet is 3³⁴ ≈ 1.67×10¹⁶ tiles, about 2 PB at one
+  bit each, so the hierarchy is an *address space*, not an object. Space is
+  produced from a seed and a position, on demand.
+- Generation runs **top-down**, never per tile. A corridor can span a block
+  because the block decided so. Hashing tiles independently gives texture;
+  this gives structure.
+
+**Designed, not built:**
+
+- Space changes in response to how the player moves through it.
+- A change replaces a unit with a **very similar** one — not a different one.
+  The point is to undermine the player's confidence in their own memory, which
+  needs the replacement to be almost right. A wholly different space reads as a
+  teleport and is merely surprising.
+- Which level gets replaced sets the scale of the wrongness: a cell is a tile
+  out of place, a district is an unmistakably different area.
+
+**Open:**
+
+- Whether revisiting a place is stable by default, decays with time or
+  distance, or always re-rolls.
+- Whether a unit should be generated standing alone or as it appears at a
+  given address inside its parents.
+- Whether unreachable space is forbidden or a deliberate tool.
+
+---
+
+## `abg-gen` — the generator
 
 | | |
 | --- | --- |
-| Path | `Cargo.toml`, `src/` |
-| Binary | `ActionBasedGeneration` |
-| Depends on | nothing yet |
-| Owns | the actual subject of this project |
+| Path | `crates/abg-gen/` |
+| Library | `abg_gen` |
+| Depends on | **nothing** |
+| Owns | turning a seed and a level into a grid of walls and open space |
 
-### Status
+No dependencies is deliberate: generation has to be reproducible, and anything
+external is something that can change the output between versions. That
+includes the random number generator, which is a hand-written splitmix64 rather
+than `rand`.
 
-A `fn main()` printing `Hello, world!`. Nothing about action-based generation
-is implemented or specified yet.
+### Modules
 
-### To be filled in
+| File | Owns |
+| --- | --- |
+| `src/lib.rs` | `Level`, `Params`, `Grid`, and the recursive generator. |
+| `src/cells.rs` | The 3×3 cell alphabet: all 512 arrangements, which are legal, and the distance between them. |
 
-The sections below are the shape this document should take once the design
-exists. Leave them as open questions rather than guessing at answers.
+### How a unit is generated
 
-- **What "action-based generation" means here** — the problem being solved, and
-  what an *action* is in this system.
-- **Core types** — what an action is as data, what a generation step consumes
-  and produces.
-- **Pipeline** — the stages a generation run passes through, in order, and what
-  crosses each boundary.
-- **Extension points** — what is meant to be swappable.
-- **External interfaces** — CLI, library API, file formats, anything persisted.
+```
+generate(level, params)
+  └─ allocate ONE Grid of side 3^depth, all wall
+     └─ fill(depth, x, y)                       recursive, writes in place
+          depth 0  → open the single tile
+          depth 1  → choose a legal cell, write its 9 tiles
+          depth n  → fill the 9 children
+                     carve a random spanning tree between their centres
+                     carve some of the 4 spare links  (connectivity)
+```
+
+Children are generated independently, so their open space does not line up at
+the boundaries. Corridors are carved deliberately rather than hoped for.
+
+### The invariant everything rests on
+
+**The centre tile of every unit at every level is open.** It holds because the
+centre of a unit is the centre of its centre child, down to a single tile, and
+the cell alphabet excludes any cell with a walled centre.
+
+That is what makes corridor carving work: every carve runs centre-to-centre and
+is guaranteed to land on open space at both ends. Which in turn gives the real
+guarantee — **every open tile in a unit is reachable from its centre**, at
+every level and every parameter setting. `Grid::reachable_from_centre` measures
+it rather than assuming it, and the test suite checks it across levels, seeds,
+openness and connectivity.
+
+### The cell alphabet
+
+512 possible 3×3 arrangements; **161 are legal**. Two rules: the centre is
+open, and no open tile is sealed off from it. A corner tile is reachable only
+through one of its two adjacent edges, which is what eliminates the rest.
+
+The legal set is **connected under single-tile changes** — any legal cell can
+be reached from any other by flipping one tile at a time without passing
+through an illegal cell. That is asserted by a test, because it is the property
+the not-yet-built "replace with a very similar one" mechanic depends on.
+
+### Parameters
+
+| Field | Does |
+| --- | --- |
+| `seed` | Picks the world. |
+| `openness` | How much space cells leave open, 0–255. Has a floor near 37%: corridors must connect regardless, so a unit cannot be made mostly solid. |
+| `connectivity` | Corridors beyond the eight needed. 0 is a perfect maze, 255 links all twelve neighbours. Only ever adds, so full connectivity survives. |
+| `nudge` | Unused. Reserved for player-driven change; present now because adding it later would mean touching every call site. |
+
+Integers, not floats — float results are not guaranteed bit-identical across
+platforms, and generation has to be reproducible.
+
+---
+
+## `abg-viewer` — the generator's window
+
+| | |
+| --- | --- |
+| Path | `crates/abg-viewer/` |
+| Binary | `abg-viewer` |
+| Depends on | `abg-gen`, `eframe` + `egui` 0.31 |
+| Owns | drawing a generated unit and the controls that produce it |
+
+White is wall, black is open. No player, nothing moves. It exists to answer one
+question: does the output read as architecture, or as static?
+
+Controls are unit, seed, openness, connectivity, and a grid overlay that can
+outline any level below the one on screen. The stats panel reports size, open
+percentage, bytes held, generation time, and how much of the open space is
+actually reachable — that last one measured every frame, so a connectivity bug
+would show rather than hide.
+
+Tiles are drawn at a whole number of screen pixels each. Without that snap,
+some tiles get two pixels and some get one, which reads as structure that is
+not in the data.
 
 ---
 
@@ -59,7 +169,7 @@ exists. Leave them as open questions rather than guessing at answers.
 | --- | --- |
 | Path | `crates/git-ui/` |
 | Binary | `abg-git-ui` |
-| Depends on | `eframe` + `egui` 0.31 (GUI), `rfd` (native folder picker), `serde` (persisted settings) |
+| Depends on | `eframe` + `egui` 0.31, `rfd`, `serde`, `webbrowser` |
 | Also needs | the `git` CLI on `PATH` at runtime |
 | Owns | clone / status / pull / push, driven from a window instead of a terminal |
 
@@ -69,7 +179,7 @@ exists. Leave them as open questions rather than guessing at answers.
 | --- | --- |
 | `src/main.rs` | Window setup and `eframe` entry point. Hides the console in release builds. |
 | `src/git.rs` | Every call to the `git` binary, and the parsing of its output. Knows nothing about the UI. |
-| `src/app.rs` | All egui drawing, the worker-thread job queue, and persisted settings. Knows nothing about git's argument syntax beyond the lists it builds. |
+| `src/app.rs` | All egui drawing, the worker-thread job queue, and persisted settings. |
 
 ### Data flow
 
@@ -89,9 +199,11 @@ thread never blocks on git.
 ### Key decisions
 
 - Drives the `git` CLI rather than linking libgit2, so authentication is
-  whatever the user's `git` already uses. See `docs/DECISIONS.md`.
-- Nothing destructive is exposed: no force push, no reset, no discard, no branch
-  deletion. Those stay in a terminal deliberately.
+  whatever the user's `git` already uses. See `docs/DECISIONS.md` 0001.
+- External targets are opened through the platform's handler API, never a
+  shell, and remote URLs are validated against an allow-list. See 0004.
+- Nothing destructive is exposed: no force push, no reset, no discard, no
+  branch deletion.
 
 ---
 
@@ -100,8 +212,10 @@ thread never blocks on git.
 | File | Owns |
 | --- | --- |
 | `Cargo.toml` (root) | The root package *and* the workspace member list. Both live in one file. |
-| `git-ui.cmd` | Windows launcher: puts MinGW's binutils on `PATH`, builds release, starts the exe. |
+| `viewer.cmd` | Windows launcher for the generator viewer. |
+| `git-ui.cmd` | Windows launcher for the git UI. |
+| `.gitattributes` | LF in the repository; CRLF in the working tree for `.cmd`, `.bat`, `.ps1`. |
 | `.gitignore` | `target/`, `*.zip`, editor and debug leftovers. |
 
-The MinGW `PATH` dance exists because the toolchain is `windows-gnu`; see
-`CLAUDE.md` §2.
+Both `.cmd` launchers put MinGW's binutils on `PATH` because the toolchain is
+`windows-gnu`; see `CLAUDE.md` §2.
