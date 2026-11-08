@@ -11,7 +11,9 @@
 
 use std::time::Instant;
 
-use abg_gen::{Grid, Level, Nudges, Params, generate_with};
+use abg_gen::{Grid, Kind, Kinds, Level, Nudges, Params, generate_with};
+
+mod compare;
 
 /// Drawn over the tiles to show where one unit of a given level ends and the
 /// next begins. Amber because it has to stay visible against both black open
@@ -25,13 +27,71 @@ const CLICKED_COLOUR: egui::Color32 = egui::Color32::from_rgb(90, 200, 255);
 /// rather than a grid, so it is not drawn at all.
 const MIN_GRID_SPACING: f32 = 3.0;
 
+/// What a single change does. Exactly one of these, so "turn once" means
+/// a turn and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Flip,
+    Turn,
+    Mirror,
+    Slide,
+    Mix,
+}
+
+impl Pick {
+    const ALL: [Pick; 5] = [Pick::Flip, Pick::Turn, Pick::Mirror, Pick::Slide, Pick::Mix];
+
+    fn label(self) -> &'static str {
+        match self {
+            Pick::Flip => "switch one tile",
+            Pick::Turn => "turn a quarter",
+            Pick::Mirror => "mirror",
+            Pick::Slide => "walk one tile",
+            Pick::Mix => "a mix of all four",
+        }
+    }
+
+    fn kinds(self) -> Kinds {
+        let none = Kinds {
+            flip: false,
+            turn: false,
+            mirror: false,
+            slide: false,
+        };
+        match self {
+            Pick::Flip => Kinds { flip: true, ..none },
+            Pick::Turn => Kinds { turn: true, ..none },
+            Pick::Mirror => Kinds {
+                mirror: true,
+                ..none
+            },
+            Pick::Slide => Kinds {
+                slide: true,
+                ..none
+            },
+            Pick::Mix => Kinds::ALL,
+        }
+    }
+}
+
+/// Which screen is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Generate,
+    Compare,
+}
+
 struct Viewer {
+    tab: Tab,
+    compare: compare::Compare,
     level: Level,
     params: Params,
     /// Which level's boundaries to outline, and the unit size a click acts on.
     grid_level: Option<Level>,
-    /// How many single-tile changes one click applies.
+    /// How many changes one click applies.
     difference: u32,
+    /// What one change does.
+    pick: Pick,
     nudges: Nudges,
     /// Bumped whenever the nudges change, so the picture is regenerated
     /// without having to compare the whole map.
@@ -64,6 +124,7 @@ impl Viewer {
             params: Params::default(),
             grid_level: Some(Level::Cell),
             difference: 1,
+            pick: Pick::Flip,
             nudges: Nudges::new(),
             revision: 0,
             last_click: None,
@@ -72,6 +133,8 @@ impl Viewer {
             texture: None,
             stats: Stats::default(),
             last_scale: None,
+            tab: Tab::Generate,
+            compare: compare::Compare::new(),
             rng: 0x2545_F491_4F6C_DD1D,
         }
     }
@@ -126,14 +189,24 @@ impl Viewer {
         let unit = grid_level.side();
         let (ox, oy) = ((x / unit) * unit, (y / unit) * unit);
 
-        // Each step moves one cell to a legal neighbour of itself, a single
-        // tile different. Scattering the steps over the unit rather than
-        // spending them all in one place is what makes the result read as
-        // "something is subtly off" instead of "that corner was rebuilt".
+        // Scattering the changes over the unit rather than spending them
+        // all in one place is what makes the result read as "something is
+        // subtly off" instead of "that corner was rebuilt".
+        let allowed = self.pick.kinds().list();
         for _ in 0..self.difference {
+            if allowed.is_empty() {
+                break;
+            }
             let tx = ox + (self.random() % u64::from(unit)) as u32;
             let ty = oy + (self.random() % u64::from(unit)) as u32;
-            self.nudges.push(tx, ty);
+            let mut kind = allowed[(self.random() % allowed.len() as u64) as usize];
+            if matches!(kind, Kind::Slide(_, _)) {
+                // Which way it slides is decided here rather than stored in
+                // the list, so every slide is not the same slide. Only
+                // single-step slides, so one walk really is one step.
+                kind = Kind::SINGLE_SLIDES[(self.random() % 4) as usize];
+            }
+            self.nudges.apply(tx, ty, kind);
         }
 
         self.last_click = Some((ox, oy, unit));
@@ -183,16 +256,54 @@ impl Viewer {
 
         ui.add_space(12.0);
         ui.label(egui::RichText::new("Difference per click").strong());
-        ui.add(egui::Slider::new(&mut self.difference, 1..=32).text("tiles"));
+        ui.add(egui::Slider::new(&mut self.difference, 1..=32).text("changes"));
         ui.label(
             egui::RichText::new(
                 "How far the replacement is allowed to be from what was there. \
-                 1 is the smallest change the space can make. Steps can undo \
+                 1 is the smallest change the space can make. Changes can undo \
                  each other, so this is an upper bound.",
             )
             .small()
             .weak(),
         );
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("What one change does").strong());
+        for pick in Pick::ALL {
+            ui.radio_value(&mut self.pick, pick, pick.label());
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "A click applies {} \u{00d7} {} to the unit you clicked.",
+                self.difference,
+                self.pick.label()
+            ))
+            .small()
+            .weak(),
+        );
+        if self.grid_level.is_some_and(|level| level.depth() > 1) {
+            ui.label(
+                egui::RichText::new(
+                    "Corridors are carved after cells, so above cell level one \
+                     can run back over a change and open part of it up again. \
+                     The change still happened; the finished unit just stops \
+                     reading as one clean step. Set the grid to cell to see a \
+                     change exactly as it was made.",
+                )
+                .small()
+                .color(egui::Color32::from_rgb(220, 160, 90)),
+            );
+        }
+        if self.pick == Pick::Slide {
+            ui.label(
+                egui::RichText::new(
+                    "A walk moves the centre tile, and a cell with a walled \
+                     centre is illegal, so a walk that would do that is \
+                     refused outright. Rather more than half of them are.",
+                )
+                .small()
+                .weak(),
+            );
+        }
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -277,9 +388,8 @@ impl Viewer {
             ui.label("changes");
             ui.label(format!(
                 "{} bytes",
-                // Two u32 coordinates and a u32 count per touched cell, which
-                // is the whole cost of everything the player has disturbed.
-                self.nudges.touched_cells() * 12
+                // The whole cost of everything the player has disturbed.
+                self.nudges.bytes()
             ));
             ui.end_row();
 
@@ -380,8 +490,8 @@ impl Viewer {
     }
 }
 
-impl eframe::App for Viewer {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl Viewer {
+    fn generate_tab(&mut self, ctx: &egui::Context) {
         if self.shown != Some((self.level, self.params, self.revision)) {
             self.regenerate(ctx);
         }
@@ -413,6 +523,45 @@ impl eframe::App for Viewer {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_tiles(ui);
         });
+    }
+
+    fn compare_tab(&mut self, ctx: &egui::Context) {
+        self.compare.refresh_if_needed(ctx);
+
+        egui::SidePanel::left("compare-controls")
+            .resizable(false)
+            .exact_width(390.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.compare.controls(ui);
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    self.compare.results(ui);
+                });
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.compare.draw(ui);
+        });
+    }
+}
+
+impl eframe::App for Viewer {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Generate, "  Generate  ");
+                ui.selectable_value(&mut self.tab, Tab::Compare, "  Compare  ");
+            });
+            ui.add_space(5.0);
+        });
+
+        match self.tab {
+            Tab::Generate => self.generate_tab(ctx),
+            Tab::Compare => self.compare_tab(ctx),
+        }
     }
 }
 
