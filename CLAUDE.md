@@ -103,19 +103,33 @@ One logical change per commit. Formatting-only changes go in their own
 Other people work on this repository. That drives everything below.
 
 - **Never commit directly to `main`.** `main` is what everyone pulls.
-- Work on a branch named `<type>/<short-slug>`, matching the commit type:
-  `feat/action-sampler`, `fix/git-ui-detached-head`, `docs/project-map`.
+- **Each person works on their own long-lived branch,** named `dev/<name>`:
+  `dev/cifosi2500`. Day-to-day work is committed and pushed there freely, as
+  often as you like. Nobody else is affected by what lands on it.
+- `main` changes **only when the people involved agree it should** — then, and
+  only then, open a pull request from your branch into `main`. There is no
+  expectation that every change gets its own branch or its own PR.
+- Short-lived `<type>/<short-slug>` branches (`feat/action-sampler`,
+  `fix/git-ui-detached-head`) are still fine for a self-contained change you
+  want reviewed on its own. They are the exception now, not the rule.
 - **Always `git pull --rebase`.** Never create a merge commit by pulling. The
   git UI's "Pull with rebase" checkbox is on by default for this reason.
-- Rebase your branch onto the current `main` before opening a pull request.
-- Open a **pull request** for every change. PR title follows the same
-  Conventional Commit format; the body says what changed, why, and how it was
-  tested. Merge with **squash merge** so `main` keeps one clean commit per change.
+- **Keep your branch close to `main`.** After anyone's work merges, bring it
+  into yours (`git pull origin main` while on your branch, or Fetch + the
+  branch switcher in the UI). A personal branch that sits untouched for weeks
+  turns the eventual merge into the hardest part of the project — this is the
+  one real cost of working this way, and it is paid in advance or with
+  interest.
+- PR title follows the Conventional Commit format; the body says what changed,
+  why, and how it was tested. Prefer **squash merge** when a PR is one logical
+  change; a long-running personal branch may be merged normally so its history
+  survives.
 - **Never force-push `main` or any branch someone else may have checked out.**
   Force-pushing your own unshared feature branch after a rebase is fine, and
   only with `--force-with-lease`.
 - Never rewrite history that is already on `main`.
-- Delete the branch after the PR merges.
+- Delete a short-lived branch after its PR merges. **Personal `dev/<name>`
+  branches are not deleted** — they carry on after the merge.
 
 Nothing destructive is automated. No `reset --hard`, no `clean -fd`, no force
 push, no branch deletion without being asked for it explicitly.

@@ -34,35 +34,61 @@ cargo build
 ## Everyday workflow
 
 ```bash
-git switch main
-git pull --rebase
-git switch -c feat/thing-you-are-adding
+git switch dev/your-name   # your own branch; create it once, then stay on it
 # ...work...
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 git add -A
 git commit            # see the format below
-git push -u origin feat/thing-you-are-adding
+git push
 ```
 
-Then open a pull request on GitHub.
+That is the whole day-to-day loop, and after the first `switch` it needs no
+branch handling at all. Push as often as you like: your branch is yours, and
+nothing you put on it reaches anyone else.
+
+When you and the other people on the project agree the work is ready, open a
+pull request from your branch into `main`. Afterwards, bring `main` back into
+your branch so the two do not drift:
+
+```bash
+git pull origin main       # while on your own branch
+```
+
+Creating your branch, once:
+
+```bash
+git switch main
+git pull
+git switch -c dev/your-name
+git push -u origin dev/your-name
+```
 
 There is also a desktop UI for the routine parts — status, commit, pull, push —
 in `crates/git-ui`. Run `git-ui.cmd` or `cargo run --release -p abg-git-ui`.
 
 ## Branches
 
-Named `<type>/<short-slug>`, where the type matches the commit type:
+Everyone has a long-lived personal branch, `dev/<name>`:
+
+```
+dev/cifosi2500
+```
+
+That is where your work lives. It is never deleted, and it only reaches `main`
+through a pull request opened when the people involved agree it is ready.
+
+For a self-contained change you want reviewed on its own, a short-lived branch
+still works, named `<type>/<short-slug>` where the type matches the commit type:
 
 ```
 feat/action-sampler
 fix/git-ui-detached-head
 docs/project-map
-refactor/split-generator
 ```
 
-Delete the branch once its PR is merged.
+Delete those once their PR is merged. Personal branches stay.
 
 ## Commit messages
 

@@ -53,14 +53,27 @@ Never commit to `main`. Check where you are:
 git branch --show-current
 ```
 
-If it is `main`, create a branch named `<type>/<short-slug>` matching the
-commit type:
+If it is `main`, stop and ask where the work should go. Do not pick for them.
+Two answers are valid:
 
-```bash
-git switch -c feat/action-sampler
-```
+- **Their personal branch**, `dev/<name>` — the normal case. Switch to the
+  existing one; never invent a new personal branch:
+
+  ```bash
+  git switch dev/cifosi2500
+  ```
+
+- **A short-lived branch** for a self-contained change they want reviewed on
+  its own, named `<type>/<short-slug>` matching the commit type:
+
+  ```bash
+  git switch -c feat/action-sampler
+  ```
 
 `feat` `fix` `docs` `refactor` `perf` `test` `build` `chore` `revert`
+
+Note that `main` moving is a decision the people on the project make together,
+so opening the pull request is the end of this skill, never merging it.
 
 ## 5. Write the commit
 
