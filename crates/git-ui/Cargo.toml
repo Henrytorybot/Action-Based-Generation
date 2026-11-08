@@ -13,3 +13,5 @@ eframe = { version = "0.31", features = ["persistence"] }
 egui = "0.31"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
+# Opens URLs through the platform's handler API instead of a shell command.
+webbrowser = "1.2"

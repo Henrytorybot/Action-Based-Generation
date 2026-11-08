@@ -258,34 +258,120 @@ pub fn status(path: &Path) -> Result<RepoStatus, String> {
 /// Turn an `origin` URL into something a browser can open.
 pub fn web_url(remote: &str) -> Option<String> {
     let remote = remote.trim().trim_end_matches(".git");
-    if let Some(rest) = remote.strip_prefix("git@") {
-        return Some(format!("https://{}", rest.replacen(':', "/", 1)));
-    }
-    if let Some(rest) = remote.strip_prefix("ssh://git@") {
-        return Some(format!("https://{rest}"));
-    }
-    if remote.starts_with("http://") || remote.starts_with("https://") {
-        return Some(remote.to_string());
-    }
-    None
+    let candidate = if let Some(rest) = remote.strip_prefix("git@") {
+        format!("https://{}", rest.replacen(':', "/", 1))
+    } else if let Some(rest) = remote.strip_prefix("ssh://git@") {
+        format!("https://{rest}")
+    } else if remote.starts_with("http://") || remote.starts_with("https://") {
+        remote.to_string()
+    } else {
+        return None;
+    };
+
+    is_safe_web_url(&candidate).then_some(candidate)
 }
 
-/// Open a folder or URL with the system handler.
-pub fn open_externally(target: &str) {
+/// Whether a URL is safe to hand to the system's URL handler.
+///
+/// The remote URL is not trusted input: it comes from `.git/config`, which
+/// arrives with any repository that gets cloned. A conservative allow-list is
+/// used rather than escaping, because the rules for quoting a string safely
+/// differ between every handler it might reach.
+///
+/// Anything with credentials (`@`), a query string, a fragment, whitespace,
+/// control characters or shell metacharacters is rejected. A URL for browsing
+/// a repository needs none of those.
+fn is_safe_web_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+
+    if rest.is_empty() || url.len() > 2048 {
+        return false;
+    }
+    // A host has to come before the first '/'.
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.is_empty() || !host.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    rest.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | '~' | '+' | ':'))
+}
+
+/// Open a URL in the default browser.
+///
+/// Goes through `webbrowser`, which calls the platform's handler API directly.
+/// Nothing is passed through a shell, so the URL cannot be read as a command.
+pub fn open_url(url: &str) {
+    if is_safe_web_url(url) {
+        let _ = webbrowser::open(url);
+    }
+}
+
+/// Reveal a folder in the system file manager.
+///
+/// The path is passed as a single process argument, never through a shell.
+pub fn open_folder(path: &Path) {
+    if !path.is_dir() {
+        return;
+    }
     #[cfg(windows)]
-    {
+    let mut cmd = {
         use std::os::windows::process::CommandExt;
-        let _ = Command::new("cmd")
-            .args(["/C", "start", "", target])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-    }
+        let mut c = Command::new("explorer.exe");
+        c.creation_flags(CREATE_NO_WINDOW);
+        c
+    };
     #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("open").arg(target).spawn();
-    }
+    let mut cmd = Command::new("open");
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = Command::new("xdg-open").arg(target).spawn();
+    let mut cmd = Command::new("xdg-open");
+
+    let _ = cmd.arg(path).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_shell_metacharacters_in_remote() {
+        // The `&` would end the command and start a new one if this string
+        // ever reached a shell.
+        assert_eq!(
+            web_url("https://github.com/o/r&calc.exe"),
+            None,
+            "a remote URL carrying a command separator must not be opened"
+        );
+        assert_eq!(web_url("https://github.com/o/r\nwhoami"), None);
+        assert_eq!(web_url("https://github.com/o/r | whoami"), None);
+        assert_eq!(web_url("https://user:pw@evil.example/o/r"), None);
+    }
+
+    #[test]
+    fn accepts_ordinary_remotes() {
+        assert_eq!(
+            web_url("https://github.com/Henrytorybot/Action-Based-Generation.git"),
+            Some("https://github.com/Henrytorybot/Action-Based-Generation".to_string())
+        );
+        assert_eq!(
+            web_url("git@github.com:Henrytorybot/Action-Based-Generation.git"),
+            Some("https://github.com/Henrytorybot/Action-Based-Generation".to_string())
+        );
+        assert_eq!(
+            web_url("ssh://git@github.com/o/r"),
+            Some("https://github.com/o/r".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        assert_eq!(web_url("file:///C:/Windows"), None);
+        assert_eq!(web_url("javascript:alert(1)"), None);
+        assert_eq!(web_url(""), None);
     }
 }

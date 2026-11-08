@@ -482,12 +482,12 @@ impl GitApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Open folder").clicked() {
-                        git::open_externally(&st.root.display().to_string());
+                        git::open_folder(&st.root);
                     }
                     if let Some(url) = st.remote_url.as_deref().and_then(git::web_url)
                         && ui.button("Open on GitHub").clicked()
                     {
-                        git::open_externally(&url);
+                        git::open_url(&url);
                     }
                 });
 

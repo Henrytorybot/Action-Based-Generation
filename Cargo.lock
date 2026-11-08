@@ -30,6 +30,7 @@ dependencies = [
  "egui",
  "rfd",
  "serde",
+ "webbrowser",
 ]
 
 [[package]]
