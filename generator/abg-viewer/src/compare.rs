@@ -5,17 +5,22 @@
 //! same as that" — which is the mutation mechanic asked for a result instead
 //! of a number of steps.
 //!
-//! The figure that matters most on this screen is the one at the bottom: what
-//! two *unrelated* units score. Wall agrees with wall by chance, so that is
-//! the floor of every percentage here, and it is nowhere near zero. Without it
-//! on screen, 70% looks like "fairly similar" when it actually means "nothing
-//! to do with each other".
+//! Likeness is counted at the first degree only. Two cells are alike where
+//! one single thing would make them equal — one tile changed, one rotation,
+//! one mirror through the middle, or one walk of a tile — and otherwise they
+//! are not alike at all. There is no sliding scale, because "four changes
+//! away" is not a weaker kind of recognition; it is no recognition.
+//!
+//! The column that matters most is the right-hand one: what two *unrelated*
+//! units score. Wall agrees with wall by chance, so that is the floor of every
+//! percentage here, and it is nowhere near zero. Without it on screen, 70%
+//! looks like "fairly similar" when it means "nothing to do with each other".
 
 use std::time::Instant;
 
 use abg_gen::{
     Grid, Kinds, Level, Nudges, Params, generate, generate_with,
-    similarity::{MAX_DEGREE, Report, compare, nudges_for_tile_similarity},
+    similarity::{Report, compare, nudges_for_tile_similarity},
 };
 
 /// How the right-hand unit is produced.
@@ -268,38 +273,72 @@ impl Compare {
             return;
         };
 
-        ui.label(egui::RichText::new("Steps needed to match").strong());
+        ui.label(egui::RichText::new("How alike they are").strong());
         ui.label(
             egui::RichText::new(
-                "Share of cells that become equal within that many single steps \
-                 of one kind: flip a tile, turn a quarter, mirror once, slide \
-                 one tile.",
+                "Cells count as alike only where one single thing would make \
+                 them equal. Anything further away is not alike at all.",
             )
             .small()
             .weak(),
         );
         ui.add_space(6.0);
-        degree_table(ui, "degrees", &report, self.floor.as_ref());
 
-        if let Some(floor) = self.floor.as_ref() {
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new("the same table for two unrelated units")
-                    .small()
-                    .color(FLOOR_COLOUR),
-            );
-            ui.add_space(2.0);
-            degree_table(ui, "degrees-floor", floor, None);
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(
-                    "That is the floor, not zero. Only figures standing clear of \
-                     it mean anything, which is what the colour above marks.",
-                )
-                .small()
-                .weak(),
-            );
-        }
+        let floor = self.floor.as_ref().map(Report::patterns);
+
+        egui::Grid::new("likeness")
+            .num_columns(4)
+            .spacing([8.0, 5.0])
+            .show(ui, |ui| {
+                ui.label("");
+                ui.label("");
+                ui.label(egui::RichText::new("this pair").small().weak());
+                ui.label(egui::RichText::new("unrelated").small().color(FLOOR_COLOUR));
+                ui.end_row();
+
+                for (index, (label, value)) in report.patterns().into_iter().enumerate() {
+                    ui.label(egui::RichText::new(label).small());
+                    match value {
+                        Some(value) => {
+                            let base = floor.and_then(|rows| rows[index].1);
+                            ui.add(
+                                egui::ProgressBar::new(value / 100.0)
+                                    .desired_width(70.0)
+                                    .fill(shade(value, base)),
+                            );
+                            ui.label(egui::RichText::new(format!("{value:.1}%")).small());
+                            ui.label(
+                                egui::RichText::new(
+                                    base.map_or_else(|| "-".to_string(), |b| format!("{b:.1}%")),
+                                )
+                                .small()
+                                .color(FLOOR_COLOUR),
+                            );
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("-").weak());
+                            ui.label(
+                                egui::RichText::new("too small to have cells")
+                                    .small()
+                                    .weak(),
+                            );
+                            ui.label("");
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(
+                "The right-hand column is the floor, not zero. Only figures \
+                 standing clear of it mean anything, which is what the colour \
+                 of the bar marks.",
+            )
+            .small()
+            .weak(),
+        );
 
         ui.add_space(14.0);
         ui.separator();
@@ -345,7 +384,7 @@ impl Compare {
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(if self.micros < 1000 {
-                format!("built and compared in {} µs", self.micros)
+                format!("built and compared in {} \u{00b5}s", self.micros)
             } else {
                 format!(
                     "built and compared in {:.2} ms",
@@ -410,54 +449,6 @@ impl Compare {
 }
 
 const FLOOR_COLOUR: egui::Color32 = egui::Color32::from_rgb(220, 160, 90);
-
-/// One row per kind of step, one column per degree. `floor` is the same table
-/// for two unrelated units; where it is given, every figure is coloured by how
-/// far it stands above its own floor rather than by its bare size.
-fn degree_table(ui: &mut egui::Ui, id: &str, report: &Report, floor: Option<&Report>) {
-    egui::Grid::new(id)
-        .num_columns(MAX_DEGREE + 2)
-        .spacing([7.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("");
-            for degree in 0..=MAX_DEGREE {
-                ui.label(egui::RichText::new(format!("{degree}")).small().weak());
-            }
-            ui.end_row();
-
-            let baseline = floor.map(Report::patterns);
-            for (index, (label, ladder)) in report.patterns().into_iter().enumerate() {
-                ui.label(egui::RichText::new(label).small());
-                match ladder {
-                    Some(ladder) => {
-                        for degree in 0..=MAX_DEGREE {
-                            let value = ladder.within[degree];
-                            let base = baseline
-                                .and_then(|rows| rows[index].1)
-                                .map(|l| l.within[degree]);
-                            let colour = if floor.is_some() {
-                                shade(value, base)
-                            } else {
-                                FLOOR_COLOUR
-                            };
-                            ui.label(
-                                egui::RichText::new(format!("{value:.0}"))
-                                    .small()
-                                    .monospace()
-                                    .color(colour),
-                            );
-                        }
-                    }
-                    None => {
-                        for _ in 0..=MAX_DEGREE {
-                            ui.label(egui::RichText::new("-").small().weak());
-                        }
-                    }
-                }
-                ui.end_row();
-            }
-        });
-}
 
 /// Green once a figure stands clear of what chance alone would give, dull
 /// otherwise. With no floor to read against, everything is dull: a bare
@@ -535,7 +526,7 @@ mod tests {
             );
             // Only a unit at least one cell across has cells to compare.
             assert_eq!(
-                report.cell_any.is_some(),
+                report.cells_similar.is_some(),
                 level.side() >= 3,
                 "{}",
                 level.name()

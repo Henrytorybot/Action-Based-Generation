@@ -128,13 +128,17 @@ pub struct Change {
 }
 
 impl Change {
-    /// How many single steps this amounts to, counted the way the comparison
-    /// counts degrees: a slide of two is one step back the other way.
+    /// How many single things this amounts to, counted the way the
+    /// comparison counts them.
+    ///
+    /// A rotation is one thing however far it turns, because any multiple of
+    /// ninety degrees is a single rotation. A mirror is one thing. A walk of
+    /// one tile along one axis is one; along both axes it is two, which is
+    /// why only single-axis walks are offered.
     pub fn steps(&self) -> u32 {
-        let turns = u32::from(self.turns % 4);
         let (dx, dy) = (u32::from(self.slide.0 % 3), u32::from(self.slide.1 % 3));
         self.flips
-            + turns.min(4 - turns) % 4
+            + u32::from(!self.turns.is_multiple_of(4))
             + u32::from(self.mirror)
             + dx.min(3 - dx)
             + dy.min(3 - dy)
@@ -1114,12 +1118,12 @@ mod tests {
             let mut nudges = Nudges::new();
             nudges.turn(0, 0);
             let after = generate_with(Level::Cell, &p, &nudges);
-            let turns = similarity::compare(&before, &after)
-                .cell_turns
+            let turned = similarity::compare(&before, &after)
+                .cells_one_turn
                 .expect("a cell has one cell");
             assert_eq!(
-                turns.within[1], 100.0,
-                "seed {seed}: a bare cell did not read back as one turn"
+                turned, 100.0,
+                "seed {seed}: a bare cell did not read back as one rotation"
             );
         }
 
@@ -1132,10 +1136,10 @@ mod tests {
                 let mut nudges = Nudges::new();
                 nudges.turn(cx * 3, cy * 3);
                 let after = generate_with(Level::House, &params, &nudges);
-                let turns = similarity::compare(&plain, &after)
-                    .cell_turns
+                let turned = similarity::compare(&plain, &after)
+                    .cells_one_turn
                     .expect("a house has cells");
-                if turns.within[1] < 100.0 {
+                if turned < 100.0 {
                     covered += 1;
                 }
             }
@@ -1180,11 +1184,12 @@ mod tests {
                 1,
             ),
             (
+                // A half turn is one rotation, not two quarter ones.
                 Change {
                     turns: 2,
                     ..Change::default()
                 },
-                2,
+                1,
             ),
             (
                 Change {

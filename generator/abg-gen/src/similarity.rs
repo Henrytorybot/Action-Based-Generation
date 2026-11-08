@@ -94,38 +94,10 @@ impl Grid {
     }
 }
 
-/// How many single steps of one kind it takes to make two cells equal.
+/// The four walks: one tile along one axis, wrapping round the cell.
 ///
-/// A step is the smallest move of that kind: flip one tile, turn a quarter,
-/// mirror once, slide one tile. Degree 0 means they already match.
-///
-/// Turns, mirrors and walks all run out quickly. Any turn is at most two
-/// quarter-turns away once you may turn either direction; any member of the
-/// turn-and-mirror family is at most two reflections away; and on a three by
-/// three that wraps, no slide is more than one step in each direction. So
-/// those three stop moving at degree 2. Only tiles keep climbing, up to the
-/// eight that can differ.
-pub const MAX_DEGREE: usize = 4;
-
-/// The share of cells reachable within each degree, from 0 up to
-/// [`MAX_DEGREE`]. It never decreases along the way: allowing more steps can
-/// only let more cells through.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Ladder {
-    pub within: [f32; MAX_DEGREE + 1],
-}
-
-impl Ladder {
-    /// The share already equal with no steps at all.
-    pub fn identical(&self) -> f32 {
-        self.within[0]
-    }
-
-    /// The share this kind of step can account for at all.
-    pub fn reach(&self) -> f32 {
-        self.within[MAX_DEGREE]
-    }
-}
+/// A slide along both axes at once is two walks, not one, so it is not here.
+const WALKS: [(u32, u32); 4] = [(1, 0), (2, 0), (0, 1), (0, 2)];
 
 /// Every sense in which two units were found to be alike, each 0 to 100.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,30 +109,40 @@ pub struct Report {
     /// eight.
     pub turned: f32,
     pub motion: Rigid,
-    /// How many tiles have to be flipped before each cell matches. `None`
+    /// Cells that are already equal, needing nothing done to them. `None`
     /// for a unit smaller than one cell.
     ///
-    /// These four, and not the whole-unit figures below them, are what a
-    /// player has a chance of noticing. A cell is a shape, and people
-    /// recognise a shape they have seen before even when it has been turned
-    /// round or slid over. A tile count across a whole unit is not a shape;
-    /// it is an accident of where walls happened to fall.
-    pub cell_tiles: Option<Ladder>,
-    /// How many quarter-turns, either direction, before each cell matches.
-    pub cell_turns: Option<Ladder>,
-    /// How many reflections before each cell matches. Two reflections make a
-    /// turn, which is why this reaches exactly as far as the turn ladder.
-    pub cell_mirrors: Option<Ladder>,
-    /// How many single-tile slides, wrapping round the edges, before each
-    /// cell matches.
+    /// This and the four below it are what a player has a chance of
+    /// noticing. A cell is a shape, and people recognise a shape they have
+    /// seen before even when it has been turned round or slid over. A tile
+    /// count across a whole unit is not a shape; it is an accident of where
+    /// walls happened to fall.
     ///
-    /// A slid cell is often not a legal cell at all, because sliding moves
+    /// Only the first degree is counted. Two cells are called alike when one
+    /// single thing would make them equal, and otherwise they are not alike
+    /// at all. Each figure below includes the cells that were already equal,
+    /// so the five of them nest rather than crossing over.
+    pub cells: Option<f32>,
+    /// Cells equal after changing at most one tile.
+    pub cells_one_tile: Option<f32>,
+    /// Cells equal after one rotation, of a quarter, a half or three
+    /// quarters. Any multiple of ninety degrees is one rotation; a half turn
+    /// is not counted as two quarter ones.
+    pub cells_one_turn: Option<f32>,
+    /// Cells equal after mirroring on one axis through the middle, at
+    /// forty-five degree increments: across, down, or either diagonal.
+    pub cells_one_mirror: Option<f32>,
+    /// Cells equal after walking one tile along one axis, wrapping round the
+    /// cell edges.
+    ///
+    /// A walked cell is often not a legal cell at all, because walking moves
     /// the centre tile and a walled centre is illegal. It still happens: 274
-    /// pairs of legal cells are slides of each other, slightly more than the
-    /// 227 related by a turn.
-    pub cell_walks: Option<Ladder>,
-    /// The best of the four for each cell: the fewest steps of any kind.
-    pub cell_any: Option<Ladder>,
+    /// pairs of legal cells are walks of each other, slightly more than the
+    /// 227 related by a rotation.
+    pub cells_one_walk: Option<f32>,
+    /// Cells alike by any of the four: one single thing would make them
+    /// equal. Anything beyond that is not alike at all.
+    pub cells_similar: Option<f32>,
     /// Overlap of the two local-pattern mixes — how far the place is made of
     /// the same small shapes, wherever those sit. Position-blind.
     pub texture: f32,
@@ -175,14 +157,15 @@ pub struct Report {
 impl Report {
     /// The figures in the order they are worth reading, with a label for each.
     /// `None` where a figure does not apply to this size.
-    /// The four kinds of step, plus the best of them. Read these first.
-    pub fn patterns(&self) -> [(&'static str, Option<Ladder>); 5] {
+    /// The ways one cell can be the same shape as another. Read these first.
+    pub fn patterns(&self) -> [(&'static str, Option<f32>); 6] {
         [
-            ("tiles flipped", self.cell_tiles),
-            ("quarter-turns", self.cell_turns),
-            ("mirrors", self.cell_mirrors),
-            ("walks", self.cell_walks),
-            ("fewest of any kind", self.cell_any),
+            ("already equal", self.cells),
+            ("one tile changed", self.cells_one_tile),
+            ("one rotation", self.cells_one_turn),
+            ("one mirror", self.cells_one_mirror),
+            ("one walk", self.cells_one_walk),
+            ("alike at all", self.cells_similar),
         ]
     }
 
@@ -210,11 +193,12 @@ pub fn compare(a: &Grid, b: &Grid) -> Report {
             tiles: 0.0,
             turned: 0.0,
             motion: Rigid::None,
-            cell_tiles: None,
-            cell_turns: None,
-            cell_mirrors: None,
-            cell_walks: None,
-            cell_any: None,
+            cells: None,
+            cells_one_tile: None,
+            cells_one_turn: None,
+            cells_one_mirror: None,
+            cells_one_walk: None,
+            cells_similar: None,
             texture: 0.0,
             openness: 0.0,
             loops: 0.0,
@@ -231,17 +215,18 @@ pub fn compare(a: &Grid, b: &Grid) -> Report {
         }
     }
 
-    let ladders = cell_ladders(a, b);
+    let tally = classify_cells(a, b);
 
     Report {
         tiles: tile_agreement(a, b),
         turned,
         motion,
-        cell_tiles: ladders.as_ref().map(|l| l.tiles),
-        cell_turns: ladders.as_ref().map(|l| l.turns),
-        cell_mirrors: ladders.as_ref().map(|l| l.mirrors),
-        cell_walks: ladders.as_ref().map(|l| l.walks),
-        cell_any: ladders.as_ref().map(|l| l.any),
+        cells: tally.map(|t| percent(t.identical, t.total)),
+        cells_one_tile: tally.map(|t| percent(t.one_tile, t.total)),
+        cells_one_turn: tally.map(|t| percent(t.one_turn, t.total)),
+        cells_one_mirror: tally.map(|t| percent(t.one_mirror, t.total)),
+        cells_one_walk: tally.map(|t| percent(t.one_walk, t.total)),
+        cells_similar: tally.map(|t| percent(t.similar, t.total)),
         texture: texture_overlap(a, b),
         openness: openness_agreement(a, b),
         loops: loop_agreement(a, b),
@@ -318,124 +303,65 @@ pub fn slid_cell(bits: u16, dx: u32, dy: u32) -> u16 {
     out
 }
 
-/// The fewest steps of each kind that would make one cell equal to another.
-/// `usize::MAX` where no number of steps of that kind ever would.
+/// How two units line up cell by cell, counted every way one single thing
+/// could make a pair of cells equal.
 #[derive(Clone, Copy)]
-struct CellDegrees {
-    tiles: usize,
-    turns: usize,
-    mirrors: usize,
-    walks: usize,
-}
-
-impl CellDegrees {
-    fn best(&self) -> usize {
-        self.tiles.min(self.turns).min(self.mirrors).min(self.walks)
-    }
-}
-
-/// How far apart one pair of cells is, in each kind of step.
-fn cell_degrees(left: u16, right: u16) -> CellDegrees {
-    let tiles = (left ^ right).count_ones() as usize;
-
-    // Turning either way, so three quarter-turns clockwise counts as one.
-    let mut turns = usize::MAX;
-    let mut rotated = right;
-    for quarters in 0..4usize {
-        if rotated == left {
-            turns = turns.min(quarters.min(4 - quarters) % 4);
-        }
-        rotated = transformed_cell(rotated, Rigid::Turn90);
-    }
-
-    // One reflection is a reflection; two make a turn. Anything outside the
-    // turn-and-mirror family stays out of reach however many you use.
-    let mirrors = if left == right {
-        0
-    } else if MIRRORS.iter().any(|&m| transformed_cell(right, m) == left) {
-        1
-    } else if TURNS.iter().any(|&m| transformed_cell(right, m) == left) {
-        2
-    } else {
-        usize::MAX
-    };
-
-    // Sliding wraps, so two along is one step back the other way.
-    let mut walks = usize::MAX;
-    for dy in 0..3u32 {
-        for dx in 0..3u32 {
-            if slid_cell(right, dx, dy) == left {
-                let steps = (dx.min(3 - dx) + dy.min(3 - dy)) as usize;
-                walks = walks.min(steps);
-            }
-        }
-    }
-
-    CellDegrees {
-        tiles,
-        turns,
-        mirrors,
-        walks,
-    }
-}
-
-/// One ladder per kind of step, over every cell of the two units.
-struct Ladders {
-    tiles: Ladder,
-    turns: Ladder,
-    mirrors: Ladder,
-    walks: Ladder,
-    any: Ladder,
+struct CellTally {
+    identical: u64,
+    one_tile: u64,
+    one_turn: u64,
+    one_mirror: u64,
+    one_walk: u64,
+    similar: u64,
+    total: u64,
 }
 
 /// `None` when the unit is smaller than a single cell and so has none.
-fn cell_ladders(a: &Grid, b: &Grid) -> Option<Ladders> {
+fn classify_cells(a: &Grid, b: &Grid) -> Option<CellTally> {
     let side = a.side();
     if side < 3 {
         return None;
     }
     let across = side / 3;
-    let total = u64::from(across) * u64::from(across);
-
-    // counts[kind][degree]: how many cells need exactly that many steps.
-    let mut counts = [[0u64; MAX_DEGREE + 1]; 5];
-    for cy in 0..across {
-        for cx in 0..across {
-            let degrees = cell_degrees(cell_bits(a, cx * 3, cy * 3), cell_bits(b, cx * 3, cy * 3));
-            let each = [
-                degrees.tiles,
-                degrees.turns,
-                degrees.mirrors,
-                degrees.walks,
-                degrees.best(),
-            ];
-            for (kind, steps) in each.into_iter().enumerate() {
-                if steps <= MAX_DEGREE {
-                    counts[kind][steps] += 1;
-                }
-            }
-        }
-    }
-
-    // Running totals, so `within[d]` answers "within d steps" rather than "at
-    // exactly d steps", which is the question anyone actually asks.
-    let ladder = |row: [u64; MAX_DEGREE + 1]| {
-        let mut within = [0.0f32; MAX_DEGREE + 1];
-        let mut running = 0u64;
-        for (degree, count) in row.into_iter().enumerate() {
-            running += count;
-            within[degree] = percent(running, total);
-        }
-        Ladder { within }
+    let mut tally = CellTally {
+        identical: 0,
+        one_tile: 0,
+        one_turn: 0,
+        one_mirror: 0,
+        one_walk: 0,
+        similar: 0,
+        total: u64::from(across) * u64::from(across),
     };
 
-    Some(Ladders {
-        tiles: ladder(counts[0]),
-        turns: ladder(counts[1]),
-        mirrors: ladder(counts[2]),
-        walks: ladder(counts[3]),
-        any: ladder(counts[4]),
-    })
+    for cy in 0..across {
+        for cx in 0..across {
+            let left = cell_bits(a, cx * 3, cy * 3);
+            let right = cell_bits(b, cx * 3, cy * 3);
+
+            // Each figure allows doing nothing as well, so the five nest:
+            // already equal is below each of the others, and all are below
+            // alike at all. Without that, a unit compared with itself would
+            // read 100 on the first and almost nothing on the rest, which
+            // looks broken rather than informative.
+            let identical = left == right;
+            let one_tile = (left ^ right).count_ones() <= 1;
+            let one_turn = identical || TURNS.iter().any(|&m| transformed_cell(right, m) == left);
+            let one_mirror =
+                identical || MIRRORS.iter().any(|&m| transformed_cell(right, m) == left);
+            let one_walk = identical
+                || WALKS
+                    .iter()
+                    .any(|&(dx, dy)| slid_cell(right, dx, dy) == left);
+
+            tally.identical += u64::from(identical);
+            tally.one_tile += u64::from(one_tile);
+            tally.one_turn += u64::from(one_turn);
+            tally.one_mirror += u64::from(one_mirror);
+            tally.one_walk += u64::from(one_walk);
+            tally.similar += u64::from(one_tile || one_turn || one_mirror || one_walk);
+        }
+    }
+    Some(tally)
 }
 
 /// Count of every 3x3 neighbourhood shape in the grid. Outside counts as
@@ -673,25 +599,17 @@ mod tests {
         out
     }
 
-    fn ladders_of(report: &Report) -> Vec<(&str, Ladder)> {
-        report
-            .patterns()
-            .into_iter()
-            .filter_map(|(label, ladder)| ladder.map(|l| (label, l)))
-            .collect()
-    }
-
-    // ---- the degree ladders -------------------------------------------
+    // ---- first-degree likeness ----------------------------------------
 
     #[test]
-    fn a_unit_needs_no_steps_to_equal_itself() {
+    fn a_unit_is_already_equal_to_itself() {
         let grid = unit(Level::House, 7);
         let report = compare(&grid, &grid);
-        for (label, ladder) in ladders_of(&report) {
+        for (label, value) in report.patterns() {
             assert_eq!(
-                ladder.identical(),
-                100.0,
-                "{label} wanted steps to match a unit with itself"
+                value,
+                Some(100.0),
+                "{label} did not read 100 comparing a unit with itself"
             );
         }
         for (label, value) in report.background() {
@@ -703,140 +621,127 @@ mod tests {
     }
 
     #[test]
-    fn one_tile_flipped_is_one_step() {
+    fn one_tile_changed_is_alike_but_not_equal() {
         let grid = unit(Level::House, 41);
         let mut nudged = grid.clone();
         nudged.set_wall(4, 4, !grid.is_wall(4, 4));
+        let report = compare(&grid, &nudged);
 
-        let tiles = compare(&grid, &nudged)
-            .cell_tiles
-            .expect("a house has cells");
-        assert_eq!(
-            tiles.within[1], 100.0,
-            "one flipped tile should put every cell within one step"
-        );
+        assert_eq!(report.cells_one_tile, Some(100.0));
+        assert_eq!(report.cells_similar, Some(100.0));
         assert!(
-            tiles.identical() < 100.0,
-            "the flipped cell should not count as already identical"
+            report.cells.is_some_and(|v| v < 100.0),
+            "the changed cell should not count as already equal"
         );
     }
 
     #[test]
-    fn a_quarter_turn_is_one_step_and_a_half_turn_is_two() {
+    fn two_tiles_changed_is_not_alike_at_all() {
+        // The whole point of stopping at the first degree: two changes is not
+        // "slightly less similar", it is not similar.
+        let grid = unit(Level::Cell, 12);
+        let mut far = grid.clone();
+        let mut changed = 0;
+        for i in 0..9u32 {
+            let (x, y) = (i % 3, i / 3);
+            if (x, y) != (1, 1) && changed < 2 {
+                far.set_wall(x, y, !grid.is_wall(x, y));
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 2);
+        let report = compare(&grid, &far);
+        assert_eq!(report.cells_one_tile, Some(0.0));
+        assert_eq!(report.cells, Some(0.0));
+    }
+
+    #[test]
+    fn every_rotation_is_one_rotation() {
+        // A half turn is one rotation, not two quarter ones.
         let grid = unit(Level::House, 17);
-        for (motion, expected) in [(Rigid::Turn90, 1), (Rigid::Turn180, 2), (Rigid::Turn270, 1)] {
+        for motion in TURNS {
             let other = per_cell(&grid, |bits| transformed_cell(bits, motion));
-            let turns = compare(&grid, &other)
-                .cell_turns
-                .expect("a house has cells");
+            let report = compare(&grid, &other);
             assert_eq!(
-                turns.within[expected],
-                100.0,
-                "{} should be {expected} step(s), but the ladder reads {:?}",
-                motion.name(),
-                turns.within
+                report.cells_one_turn,
+                Some(100.0),
+                "{} was not counted as one rotation",
+                motion.name()
             );
+            assert_eq!(report.cells_similar, Some(100.0));
         }
     }
 
     #[test]
-    fn a_mirror_is_one_step() {
+    fn every_axis_through_the_middle_is_one_mirror() {
         let grid = unit(Level::House, 19);
         for motion in MIRRORS {
             let other = per_cell(&grid, |bits| transformed_cell(bits, motion));
-            let mirrors = compare(&grid, &other)
-                .cell_mirrors
-                .expect("a house has cells");
+            let report = compare(&grid, &other);
             assert_eq!(
-                mirrors.within[1],
-                100.0,
-                "{} should be one step, but the ladder reads {:?}",
-                motion.name(),
-                mirrors.within
+                report.cells_one_mirror,
+                Some(100.0),
+                "{} was not counted as one mirror",
+                motion.name()
             );
+            assert_eq!(report.cells_similar, Some(100.0));
         }
     }
 
     #[test]
-    fn a_walk_costs_one_step_per_direction_moved() {
+    fn a_walk_along_one_axis_is_one_walk() {
         let grid = unit(Level::House, 23);
-        for step in 1..9u32 {
-            let (dx, dy) = (step % 3, step / 3);
-            // Sliding wraps, so two along is one step back the other way.
-            let expected = (dx.min(3 - dx) + dy.min(3 - dy)) as usize;
+        for (dx, dy) in WALKS {
             let other = per_cell(&grid, |bits| slid_cell(bits, dx, dy));
-            let walks = compare(&grid, &other)
-                .cell_walks
-                .expect("a house has cells");
+            let report = compare(&grid, &other);
             assert_eq!(
-                walks.within[expected], 100.0,
-                "a walk of ({dx}, {dy}) should be {expected} step(s), ladder reads {:?}",
-                walks.within
+                report.cells_one_walk,
+                Some(100.0),
+                "a walk of ({dx}, {dy}) was not counted as one walk"
             );
         }
     }
 
     #[test]
-    fn a_ladder_never_goes_down() {
-        for seed in 0..10u64 {
+    fn a_walk_along_both_axes_is_not_one_walk() {
+        // Two walks is two things, so it is not alike at the first degree.
+        // If this ever passed, "one walk" would quietly mean "up to two".
+        let grid = unit(Level::Cell, 31);
+        let diagonal = per_cell(&grid, |bits| slid_cell(bits, 1, 1));
+        let report = compare(&grid, &diagonal);
+        if report.cells == Some(0.0) {
+            assert_eq!(
+                report.cells_one_walk,
+                Some(0.0),
+                "a diagonal walk was counted as a single walk"
+            );
+        }
+    }
+
+    #[test]
+    fn the_five_figures_nest() {
+        // Each allows everything "already equal" allows and more, and all of
+        // them are below "alike at all". Numbers that crossed would make the
+        // screen lie about what allowing a rotation buys you.
+        for seed in 0..12u64 {
             let a = unit(Level::House, seed);
             let b = unit(Level::House, seed + 60);
-            for (label, ladder) in ladders_of(&compare(&a, &b)) {
-                for degree in 1..=MAX_DEGREE {
-                    assert!(
-                        ladder.within[degree] >= ladder.within[degree - 1],
-                        "{label} fell from {} to {} between degree {} and {degree}",
-                        ladder.within[degree - 1],
-                        ladder.within[degree],
-                        degree - 1
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn turns_mirrors_and_walks_run_out_at_two_steps() {
-        // The doc comment on MAX_DEGREE claims these three cannot use a third
-        // step. If that were wrong, the last columns of the table would be
-        // quietly meaningless.
-        for seed in 0..10u64 {
-            let a = unit(Level::House, seed);
-            let b = unit(Level::House, seed + 70);
-            let report = compare(&a, &b);
-            for (label, ladder) in [
-                ("turns", report.cell_turns),
-                ("mirrors", report.cell_mirrors),
-                ("walks", report.cell_walks),
-            ] {
-                let ladder = ladder.expect("a house has cells");
-                for degree in 3..=MAX_DEGREE {
-                    assert_eq!(
-                        ladder.within[degree], ladder.within[2],
-                        "{label} moved at degree {degree}: {:?}",
-                        ladder.within
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_best_of_the_four_is_never_worse_than_any_one_of_them() {
-        for seed in 0..10u64 {
-            let a = unit(Level::House, seed);
-            let b = unit(Level::House, seed + 80);
-            let report = compare(&a, &b);
-            let any = report.cell_any.expect("a house has cells");
-            for (label, ladder) in ladders_of(&report) {
-                for degree in 0..=MAX_DEGREE {
-                    assert!(
-                        any.within[degree] >= ladder.within[degree] - 0.001,
-                        "{label} reached {} at degree {degree} but the best of all four only {}",
-                        ladder.within[degree],
-                        any.within[degree]
-                    );
-                }
+            let r = compare(&a, &b);
+            let (Some(equal), Some(any)) = (r.cells, r.cells_similar) else {
+                panic!("a house has cells");
+            };
+            for (label, value) in r.patterns() {
+                let Some(value) = value else {
+                    panic!("a house has cells");
+                };
+                assert!(
+                    value >= equal - 0.001,
+                    "{label} scored {value}, below already-equal at {equal}"
+                );
+                assert!(
+                    value <= any + 0.001,
+                    "{label} scored {value}, above alike-at-all at {any}"
+                );
             }
         }
     }
@@ -847,13 +752,14 @@ mod tests {
             let a = unit(Level::Room, seed);
             let b = unit(Level::Room, seed + 100);
             let report = compare(&a, &b);
-            for (label, ladder) in ladders_of(&report) {
-                for (degree, value) in ladder.within.into_iter().enumerate() {
-                    assert!(
-                        (0.0..=100.0).contains(&value),
-                        "{label} returned {value} at degree {degree}"
-                    );
-                }
+            for (label, value) in report.patterns() {
+                let Some(value) = value else {
+                    panic!("a room has cells");
+                };
+                assert!(
+                    (0.0..=100.0).contains(&value),
+                    "{label} returned {value}, which is not a percentage"
+                );
             }
             for (label, value) in report.background() {
                 assert!(
@@ -870,10 +776,7 @@ mod tests {
         let there_and_back = per_cell(&grid, |bits| {
             slid_cell(slid_cell(slid_cell(bits, 1, 2), 1, 2), 1, 2)
         });
-        let any = compare(&grid, &there_and_back)
-            .cell_any
-            .expect("a room has cells");
-        assert_eq!(any.identical(), 100.0);
+        assert_eq!(compare(&grid, &there_and_back).cells, Some(100.0));
     }
 
     #[test]
@@ -887,19 +790,16 @@ mod tests {
 
     #[test]
     fn a_shape_is_noticed_where_a_tile_count_is_not() {
-        // Turn every cell in place. The whole-unit tile figure falls away
-        // while the turn ladder still reads 100 at one step. That gap is the
-        // entire reason these are separate figures.
+        // Rotate every cell in place. The whole-unit tile figure falls away
+        // while the rotation figure still reads 100. That gap is the entire
+        // reason these are separate figures.
         let grid = unit(Level::House, 37);
         let turned = per_cell(&grid, |bits| transformed_cell(bits, Rigid::Turn90));
         let report = compare(&grid, &turned);
-        assert_eq!(
-            report.cell_turns.expect("a house has cells").within[1],
-            100.0
-        );
+        assert_eq!(report.cells_one_turn, Some(100.0));
         assert!(
             report.tiles < 95.0,
-            "tiles scored {}, so the tile count saw the turn after all",
+            "tiles scored {}, so the tile count saw the rotation after all",
             report.tiles
         );
     }
@@ -908,7 +808,7 @@ mod tests {
     fn different_sizes_have_nothing_to_compare() {
         let report = compare(&unit(Level::Room, 1), &unit(Level::House, 1));
         assert_eq!(report.tiles, 0.0);
-        assert!(report.cell_any.is_none());
+        assert!(report.cells_similar.is_none());
     }
 
     // ---- whole-unit motions -------------------------------------------
