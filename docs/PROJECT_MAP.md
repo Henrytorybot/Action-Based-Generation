@@ -44,15 +44,22 @@ rather than guessed at.
   because the block decided so. Hashing tiles independently gives texture;
   this gives structure.
 
-**Designed, not built:**
+**Built, but not yet driven by anything:**
 
-- Space changes in response to how the player moves through it.
 - A change replaces a unit with a **very similar** one — not a different one.
   The point is to undermine the player's confidence in their own memory, which
   needs the replacement to be almost right. A wholly different space reads as a
   teleport and is merely surprising.
 - Which level gets replaced sets the scale of the wrongness: a cell is a tile
   out of place, a district is an unmistakably different area.
+- See **Changing a space** below. It works; what is missing is the trigger.
+
+**Designed, not built:**
+
+- Space changes in response to how the player *moves through it*. Today a
+  change happens because somebody clicked. What the real trigger should be —
+  crossing a boundary, leaving a unit, looking away — is undecided, and it
+  determines what the generator has to know about the player.
 
 **Open:**
 
@@ -132,7 +139,31 @@ the not-yet-built "replace with a very similar one" mechanic depends on.
 | `seed` | Picks the world. |
 | `openness` | How much space cells leave open, 0–255. Has a floor near 37%: corridors must connect regardless, so a unit cannot be made mostly solid. |
 | `connectivity` | Corridors beyond the eight needed. 0 is a perfect maze, 255 links all twelve neighbours. Only ever adds, so full connectivity survives. |
-| `nudge` | Unused. Reserved for player-driven change; present now because adding it later would mean touching every call site. |
+| `nudge` | Unused. A per-unit offset kept for whatever the eventual trigger needs; changes today go through `Nudges` instead. |
+
+### Changing a space
+
+`generate_with(level, params, &Nudges)` is the same generator with some cells
+pushed away from what the seed alone would give. A `Nudges` is a sparse map
+from a cell's origin to a step count; untouched cells — almost all of them —
+cost nothing.
+
+**One step moves one cell to a legal neighbour of itself**: exactly one tile
+different, and still a legal cell. Two properties follow, and both are tested
+rather than assumed:
+
+- **A change cannot seal anything off.** The replacement still has an open
+  centre and nothing walled away inside it, so corridor carving still lands.
+- **A change cannot cascade.** Nudging one cell in an 81×81 lot leaves every
+  tile outside that 3×3 bit-identical. Mutation is O(1) and strictly local,
+  which is what makes it affordable at world scale.
+
+Steps accumulate: pushing the same cell repeatedly walks it further through
+the alphabet, so a place drifts rather than jumping. Because the walk can
+retrace itself, *n* steps means at most *n* tiles different, not exactly *n*.
+
+Corridors are carved after cells, so a changed tile underneath a corridor is
+invisible. The change still happened; it is covered.
 
 Integers, not floats — float results are not guaranteed bit-identical across
 platforms, and generation has to be reproducible.
@@ -148,14 +179,18 @@ platforms, and generation has to be reproducible.
 | Depends on | `abg-gen`, `eframe` + `egui` 0.31 |
 | Owns | drawing a generated unit and the controls that produce it |
 
-White is wall, black is open. No player, nothing moves. It exists to answer one
-question: does the output read as architecture, or as static?
+White is wall, black is open. There is no player, but the space can be changed:
+clicking a grid square replaces that unit with a very similar one, which is the
+mutation mechanic standing in for a trigger that does not exist yet.
 
-Controls are unit, seed, openness, connectivity, and a grid overlay that can
-outline any level below the one on screen. The stats panel reports size, open
-percentage, bytes held, generation time, and how much of the open space is
-actually reachable — that last one measured every frame, so a connectivity bug
-would show rather than hide.
+Controls are unit, seed, openness, connectivity, a grid overlay that can
+outline any level below the one on screen, and how many tiles a click is
+allowed to change. The clicked unit is outlined so it is clear what moved.
+
+The stats panel reports size, open percentage, bytes held, bytes spent on
+changes, generation time, and how much of the open space is actually reachable
+— that last one measured every frame, so a connectivity bug would show rather
+than hide.
 
 Tiles are drawn at a whole number of screen pixels each. Without that snap,
 some tiles get two pixels and some get one, which reads as structure that is

@@ -14,6 +14,58 @@
 
 pub mod cells;
 
+use std::collections::HashMap;
+
+/// Which cells have been pushed away from what the seed alone would produce,
+/// and by how far.
+///
+/// This is the whole of "replace a space with a very similar one". A step
+/// moves one cell to a legal neighbour of itself — a single tile different —
+/// so the count is a budget for how wrong a place is allowed to look. Nothing
+/// is stored for untouched cells, which is almost all of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Nudges {
+    /// Keyed by the cell's top-left tile, which is always a multiple of three.
+    steps: HashMap<(u32, u32), u32>,
+}
+
+impl Nudges {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How far the cell containing `(x, y)` has been pushed.
+    pub fn steps_at(&self, x: u32, y: u32) -> u32 {
+        self.steps
+            .get(&(x - x % 3, y - y % 3))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Push the cell containing `(x, y)` one step further.
+    pub fn push(&mut self, x: u32, y: u32) {
+        *self.steps.entry((x - x % 3, y - y % 3)).or_insert(0) += 1;
+    }
+
+    /// How many cells have been touched at all.
+    pub fn touched_cells(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Every step applied so far, across all cells.
+    pub fn total_steps(&self) -> u32 {
+        self.steps.values().sum()
+    }
+
+    pub fn clear(&mut self) {
+        self.steps.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
 /// A level of the hierarchy. Each is a 3x3 arrangement of the one below.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Level {
@@ -232,13 +284,19 @@ impl Grid {
 /// into their own grids and copying them up would be the obvious way to write
 /// this, and would move every tile once per level above it.
 pub fn generate(level: Level, params: &Params) -> Grid {
+    generate_with(level, params, &Nudges::new())
+}
+
+/// Generate one unit, with some of its cells pushed away from what the seed
+/// alone would give.
+pub fn generate_with(level: Level, params: &Params, nudges: &Nudges) -> Grid {
     let mut grid = Grid::solid(level.side());
-    fill(&mut grid, level.depth(), 0, 0, params);
+    fill(&mut grid, level.depth(), 0, 0, params, nudges);
     grid
 }
 
 /// Fill the square at `(x0, y0)` of side 3^depth.
-fn fill(grid: &mut Grid, depth: u32, x0: u32, y0: u32, params: &Params) {
+fn fill(grid: &mut Grid, depth: u32, x0: u32, y0: u32, params: &Params, nudges: &Nudges) {
     if depth == 0 {
         // A lone tile is the degenerate case of the centre rule below: the
         // centre of any unit is open, and a tile is its own centre.
@@ -247,14 +305,21 @@ fn fill(grid: &mut Grid, depth: u32, x0: u32, y0: u32, params: &Params) {
     }
 
     if depth == 1 {
-        fill_cell(grid, x0, y0, params);
+        fill_cell(grid, x0, y0, params, nudges);
         return;
     }
 
     let child = 3u32.pow(depth - 1);
     for j in 0..3 {
         for i in 0..3 {
-            fill(grid, depth - 1, x0 + i * child, y0 + j * child, params);
+            fill(
+                grid,
+                depth - 1,
+                x0 + i * child,
+                y0 + j * child,
+                params,
+                nudges,
+            );
         }
     }
 
@@ -308,7 +373,7 @@ const ADJACENT: [(usize, usize); 12] = [
 ];
 
 /// Choose one of the legal cells and write it in.
-fn fill_cell(grid: &mut Grid, x0: u32, y0: u32, params: &Params) {
+fn fill_cell(grid: &mut Grid, x0: u32, y0: u32, params: &Params, nudges: &Nudges) {
     let alphabet = cells::alphabet();
 
     // Map openness onto a target number of open tiles. One is the bare centre,
@@ -317,7 +382,22 @@ fn fill_cell(grid: &mut Grid, x0: u32, y0: u32, params: &Params) {
     let candidates = alphabet.nearest_with_open_count(target);
 
     let mut rng = seed_at(params, 1, x0, y0);
-    let bits = candidates[(next(&mut rng) % candidates.len() as u64) as usize];
+    let mut bits = candidates[(next(&mut rng) % candidates.len() as u64) as usize];
+
+    // Walk away from that cell, one legal single-tile change at a time.
+    //
+    // Each step lands on a cell differing by exactly one tile, and every one
+    // is legal, so the centre stays open and nothing inside gets sealed off.
+    // Steps can undo each other, so n steps means *at most* n tiles different,
+    // not exactly n.
+    for step in 0..nudges.steps_at(x0, y0) {
+        let neighbours = cells::legal_neighbours(bits);
+        if neighbours.is_empty() {
+            break;
+        }
+        let mut walk = seed_at(params, 1, x0, y0) ^ (u64::from(step) + 1).wrapping_mul(0x9E37_79B9);
+        bits = neighbours[(next(&mut walk) % neighbours.len() as u64) as usize];
+    }
 
     for i in 0..9 {
         grid.set_wall(x0 + i % 3, y0 + i / 3, !cells::is_open(bits, i));
@@ -552,5 +632,106 @@ mod tests {
         // workable stop holding.
         let grid = generate(Level::Block, &Params::default());
         assert!(grid.bytes() < 8 * 1024, "{} bytes", grid.bytes());
+    }
+
+    fn differences(a: &Grid, b: &Grid) -> u64 {
+        let mut count = 0;
+        for y in 0..a.side() {
+            for x in 0..a.side() {
+                if a.is_wall(x, y) != b.is_wall(x, y) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn one_step_changes_exactly_one_tile() {
+        // Checked on a bare cell, where no corridor carving can cover a
+        // changed tile up. This is the smallest possible change to the world,
+        // and it has to actually be the smallest or "replace it with a very
+        // similar one" means nothing.
+        let params = Params::default();
+        for seed in 1..60u64 {
+            let params = Params { seed, ..params };
+            let before = generate(Level::Cell, &params);
+
+            let mut nudges = Nudges::new();
+            nudges.push(1, 1);
+            let after = generate_with(Level::Cell, &params, &nudges);
+
+            assert_eq!(
+                differences(&before, &after),
+                1,
+                "seed {seed}: one step moved {} tiles",
+                differences(&before, &after)
+            );
+        }
+    }
+
+    #[test]
+    fn a_nudge_stays_inside_its_own_cell() {
+        // The reason this mechanic can be cheap: changing one cell cannot
+        // disturb anything outside it, so nothing else has to be regenerated
+        // and no change can cascade.
+        let params = Params::default();
+        let before = generate(Level::Lot, &params);
+
+        let mut nudges = Nudges::new();
+        nudges.push(40, 40);
+        let after = generate_with(Level::Lot, &params, &nudges);
+
+        for y in 0..before.side() {
+            for x in 0..before.side() {
+                let inside = (39..42).contains(&x) && (39..42).contains(&y);
+                if !inside {
+                    assert_eq!(
+                        before.is_wall(x, y),
+                        after.is_wall(x, y),
+                        "tile {x},{y} changed, but it is outside the nudged cell"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nudged_space_is_still_one_connected_space() {
+        // Every step lands on a legal cell, so the centre stays open and the
+        // corridor carving still has somewhere to land. If that ever stops
+        // holding, a change could seal the player in.
+        let params = Params::default();
+        let mut nudges = Nudges::new();
+        let mut state = 99u64;
+
+        for round in 0..40 {
+            let x = (next(&mut state) % 81) as u32;
+            let y = (next(&mut state) % 81) as u32;
+            nudges.push(x, y);
+
+            let grid = generate_with(Level::Lot, &params, &nudges);
+            assert!(
+                grid.is_fully_connected(),
+                "round {round}: {} of {} open tiles reachable after {} steps",
+                grid.reachable_from_centre(),
+                grid.open_tiles(),
+                nudges.total_steps(),
+            );
+        }
+    }
+
+    #[test]
+    fn nudges_cost_nothing_until_used() {
+        let mut nudges = Nudges::new();
+        assert!(nudges.is_empty());
+        nudges.push(7, 7);
+        nudges.push(8, 8);
+        // Both land in the same cell, so this is one entry with two steps —
+        // storage grows with places touched, not with how often.
+        assert_eq!(nudges.touched_cells(), 1);
+        assert_eq!(nudges.total_steps(), 2);
+        assert_eq!(nudges.steps_at(6, 6), 2);
+        assert_eq!(nudges.steps_at(9, 9), 0);
     }
 }
