@@ -1,0 +1,17 @@
+# The generator test app, self-contained.
+#
+# This folder is a cargo workspace of its own. Cloning it alone is enough to
+# build and run the viewer; nothing outside it is referenced.
+#
+#   abg-gen     the tile-space generator  - pure, deterministic, no dependencies
+#   abg-viewer  a window for looking at what abg-gen produces
+[workspace]
+resolver = "2"
+members = ["abg-gen", "abg-viewer"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = 2

@@ -7,18 +7,8 @@
 # Store everything as LF in the repository and check it out as LF.
 * text=auto eol=lf
 
-# Exceptions: Windows shells need CRLF. cmd.exe can mis-parse an LF-only batch
-# file, so git-ui.cmd must keep its CRLF endings in the working tree.
+# Exception: cmd.exe can mis-parse an LF-only batch file, so viewer.cmd must
+# keep its CRLF endings in the working tree.
 *.cmd text eol=crlf
 *.bat text eol=crlf
 *.ps1 text eol=crlf
-
-# Never translated, never diffed as text.
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.gif binary
-*.ico binary
-*.pdf binary
-*.zip binary
-*.exe binary
