@@ -22,7 +22,7 @@ what the diff does, not what the task was meant to do.
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 

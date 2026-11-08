@@ -65,3 +65,26 @@ Template:
   rebase-on-pull and no-direct-commits-to-`main` worth the ceremony, and the
   commit format keeps the log readable without anyone having to remember what a
   change was for. This would be wrong if the project returns to a single author.
+
+## 0004 — Untrusted strings never reach a shell
+
+- **Date:** 2026-11-08
+- **Status:** accepted
+- **Decision:** anything that opens an external target does so through the
+  platform's handler API (`webbrowser` for URLs) or by passing a single process
+  argument (`explorer.exe` / `open` / `xdg-open` for folders). No `cmd /C`, no
+  shell string interpolation. Values that originate outside this codebase are
+  validated against a character allow-list before use, not escaped.
+- **Alternatives:** escaping the value for the shell. Rejected because the
+  correct quoting rules differ for every handler the string might reach — Rust
+  escapes process arguments by `CommandLineToArgvW` rules, which `cmd.exe` does
+  not follow, so an escape that looks right is not.
+- **Why:** this qualifies 0001. Driving the `git` CLI is still the right call
+  for authentication, but it means this codebase passes strings to subprocesses,
+  and some of those strings are attacker-controlled. The `origin` URL comes from
+  `.git/config`, which arrives with any cloned repository; an unquoted `&` in it
+  reached `cmd /C start` and ran as a second command. 0001 named parsing
+  `--porcelain=v2` as the only cost of shelling out; the real second cost is
+  this boundary, and it needs a rule rather than care. This would be wrong if a
+  value could be proven to originate in this codebase — but `origin` looked like
+  that too.

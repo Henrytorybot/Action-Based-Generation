@@ -39,7 +39,7 @@ git pull --rebase
 git switch -c feat/thing-you-are-adding
 # ...work...
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 git add -A
 git commit            # see the format below

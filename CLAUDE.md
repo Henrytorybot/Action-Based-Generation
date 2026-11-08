@@ -136,7 +136,8 @@ These are not optional extras; they are part of the change that touches them.
 ## 7. Rust conventions
 
 - `cargo fmt` output is the formatting; no hand-alignment arguments.
-- `cargo clippy --all-targets -- -D warnings` must be clean before a PR.
+- `cargo clippy --workspace --all-targets -- -D warnings` must be clean before a
+  PR. The `--workspace` is load-bearing; see §3.
 - No `unwrap()` or `expect()` on anything that can fail at runtime from user
   input, I/O, or a subprocess. Return `Result` and let the caller decide. In
   tests, `unwrap()` is fine.
